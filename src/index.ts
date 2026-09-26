@@ -24,7 +24,7 @@ export const name = "scheduled-send";
 export const inject = ["webServer"];
 
 /** 与 package.json 同步。 */
-export const VERSION = "0.7.3";
+export const VERSION = "0.7.4";
 
 export { Scheduler, type HostCtx } from "./host/scheduler.ts";
 export type { SchedulerConfig, SessionControllerFace } from "./host/scheduler.ts";

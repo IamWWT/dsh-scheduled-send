@@ -224,3 +224,5 @@ dsh-scheduled-send/
 本插件是 **`IamWWT/dsh-plugins`（private monorepo）** 的子包 —— 该 monorepo 是全部自研代码的
 唯一仓库；工作区根 `deepseek/` 只含 `deepseek-harness/`（上游，只读）+ `dsh-plugins/`（本仓）。
 分支模型：`main`（集成）/ `ubuntu`（agent 开发）/ `windows`（用户）。
+
+本轮体验优化版本：0.7.4。范围与验证见 [体验优化规格](docs/specs/20260925-experience/spec.md)。

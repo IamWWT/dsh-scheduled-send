@@ -134,6 +134,17 @@ const CSS = `
 .dss-group-label{font-weight:600}
 .dss-group-tip{margin-left:auto;font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:400}
 .dss-group-body{display:flex;flex-direction:column;gap:8px;padding-left:2px}
+
+/* Responsive, keyboard-accessible workspace surfaces. */
+
+.dss-wrap {min-width:0; line-height:1.6;}
+.dss-wrap * {box-sizing:border-box;}
+.dss-label,.dss-note {font-size:12px;}
+.dss-sel,.dss-input {max-width:100%; min-width:0; min-height:36px;}
+.dss-btn,.dss-btn-ghost {min-height:34px;}
+.dss-wrap :is(button,input,select,textarea):focus-visible {outline:2px solid var(--dsw-alias-link); outline-offset:2px;}
+.dss-group-head {padding:10px 2px; flex-wrap:wrap;}
+
 `;
 
 const styleOnce = (): void => {

@@ -1,3 +1,7 @@
+## 0.7.4 — 2026-09-25
+
+改进插件页面布局、窄容器适配与键盘焦点；具体范围和验证见 docs/specs/20260925-experience/。
+
 版本策略：安装一律走 **tgz**（`pnpm check` → `npm pack` → `dsh-dev plugin --profile web add <tgz>`，
 重打包必须升版本号；**不使用 link 安装**），每次发布新版本**必须**同步
 `package.json.version` / `src/index.ts` VERSION / tgz 文件名 / 文档提及（四处一致）。
