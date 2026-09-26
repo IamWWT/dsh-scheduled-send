@@ -1,0 +1,59 @@
+{
+  "name": "dsh-scheduled-send",
+  "version": "0.7.3",
+  "description": "DSH 定时发送：给排队消息/预写内容设定发送时间（如 18:30），到点由 dsh host 自动投递进会话排队队列（mode:queue），agent 运行中自动消费。定时器跑在 dsh 常驻 host 进程里，离开电脑仍会触发。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "scheduled",
+    "timer",
+    "queue"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "src/",
+    "scripts/",
+    "tsconfig.json",
+    "tsconfig.client.json",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "docs/",
+    "AGENTS.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs --no-typecheck",
+    "build:full": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs && node test/smoke-test.mjs && node test/routes-test.mjs && node test/session-opener-test.mjs && node test/session-meta-test.mjs && node test/ui-hooks-regression-test.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "test": "node test/smoke-test.mjs && node test/routes-test.mjs && node test/session-opener-test.mjs && node test/session-meta-test.mjs && node test/ui-hooks-regression-test.mjs",
+    "pack": "npm pack",
+    "verify:installed": "node scripts/verify-installed.mjs",
+    "install:dev": "bash scripts/install-to-dsh.sh",
+    "e2e": "node scripts/e2e-3082.mjs",
+    "test:smoke": "node test/smoke-test.mjs",
+    "test:routes": "node test/routes-test.mjs",
+    "test:opener": "node test/session-opener-test.mjs",
+    "test:meta": "node test/session-meta-test.mjs",
+    "test:hooks": "node test/ui-hooks-regression-test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# dsh-scheduled-send — 定时发送插件 bundle patch。
+#
+# 复用 dsh 既有能力（不重造轮子）：
+#   - 排队投递：host 侧 sessionController.prompt({ mode: "queue" })（与 QueueDock 同通道，
+#     消息进 Inbox next-turn 持久队列，agent 运行中被逐步消费，空闲时立即成为下一轮）；
+#   - 客户端入口：conversation.input.right（输入框工具行「⏰ 定时」）+ settings.section
+#     （设置面板「定时发送」管理面板）；会话作用域数据走插槽 standard props / inject 位置参数；
+#   - 定时调度跑在 dsh host 常驻进程（Node setTimeout），web 关闭 / 离开电脑仍触发。
+#
+# 注意：config 只声明代码实际消费的键（PluginConfig 仅 stateDir）。
+# 曾存在 markMissed/refreshMs 两个"纸面上有、代码未实现"的键，用户配置无效且误导，
+# 已在 v0.6.0 移除——新增配置项必须先实现再声明。
+- insert:
+  - id: scheduled-send
+    name: dsh-scheduled-send
+    config:
+      # 状态目录；留空 = $DSH_HOME/profiles/<profile>/scheduled-send（jobs.json 持久化定时任务表）
+      stateDir: ""
