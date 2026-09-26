@@ -210,13 +210,13 @@ systemd 反复重启 → 死循环。
 | 构建时 | **顶层布局卫生检查**：发现顶层 index.ts/client.js/build.mjs/client//host/ 或 node_modules 软链 → 构建报错 | `scripts/build.mjs` |
 | 构建后 | **产物门禁**：lib/*.js 存在非空；host 动态 import 断言导出 Scheduler/VERSION/apply/inject/name 且 inject 含 webServer；client 检查 __ModuleLoader__ + 插件 id + 关键插槽 | `scripts/build.mjs` |
 | 安装后 | **安装后验证器**：package.json.main 指向的文件必须存在可加载；client.js 存在；顶层无扁平残留/错误软链 | `scripts/verify-installed.mjs`（`pnpm verify:installed`） |
-| 部署 | **一键安装脚本**：构建门禁→冒烟→rm 旧→link 安装→安装后验证，失败即停；**不自动重启** | `scripts/install-to-dsh.sh`（`pnpm install:dev`） |
-| 策略 | 开发期只用 **link 安装**，tgz 仅稳定版分发且必须升版本号 | 见 README |
+| 部署 | **一键安装脚本**：构建门禁→冒烟→rm 旧→安装→安装后验证，失败即停；**不自动重启** | `scripts/install-to-dsh.sh`（`pnpm install:dev`） |
+| 策略 | 安装一律走 **tgz**（`pnpm check` → `npm pack` → `plugin add <tgz>`，重打包必须升版本号）；**不使用 link 安装** | 见 README |
 
 **判断 API 是否"装对"的速查**：
 
 ```bash
-ls -la ~/.dsh-dev/profiles/web/node_modules/dsh-scheduled-send   # 应为符号链接(link) 或含 lib/ 的目录
+ls -la ~/.dsh-dev/profiles/web/node_modules/dsh-scheduled-send   # 应为含 lib/ 的目录（tgz 安装）
 node scripts/verify-installed.mjs                                  # 就地验证，ERROR 即拦
 ```
 

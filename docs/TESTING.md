@@ -6,11 +6,12 @@
 ## 0. 命令速查
 
 ```bash
-pnpm check             # 全部离线测试：门禁构建 + host/client typecheck + smoke + routes
-pnpm test              # 离线单元测试（smoke + routes，无 3082 依赖）
+pnpm check             # 全部离线测试：门禁构建 + host/client typecheck + 下 5 个测试脚本
+pnpm test              # 离线单元测试（不含构建门禁/typecheck，无 3082 依赖）
 node test/smoke-test.mjs   # 仅 Scheduler 层
 node test/routes-test.mjs  # 仅 HTTP 路由层
 node test/session-opener-test.mjs  # 仅「打开会话」跳转 helper（this 绑定）
+node test/session-meta-test.mjs    # 仅会话标题/cwd 派生纯函数
 node test/ui-hooks-regression-test.mjs  # React UI hooks 稳定性（#310 防复发，jsdom+ErrorBoundary）
 pnpm verify:installed      # 安装布局验证（缺 lib/ / 扁平残留就地拦截）
 node scripts/e2e-3082.mjs  # 3082 在线 API 端到端（需重启后）
@@ -76,6 +77,22 @@ JobList 两次（jobs=[] → 有数据），边界捕获 #310 即失败。已实
 > 为什么单测/SSR 测不出：单测不渲染 React；SSR 每次独立渲染，不触发同一 root
 > 的状态漂移。只有"同一 root 两次渲染"能复现。
 
+### 1.3d `test/session-meta-test.mjs` — 会话元数据派生（4 项）
+
+`shared/session-meta.ts` 的纯函数 `sessionMetaOf(snap)`：把 dsh `useSessions` 投影的
+`byId`（`displayTitle`/`title`/`cwd`）折叠为 `sessionId -> {title, cwd}` 查询表，
+供设置面板展示目标会话的标题与工作目录。
+
+| # | 场景 | 断言 |
+|---|---|---|
+| 1 | displayTitle 优先 | 取 `displayTitle`，`cwd` 原样透传 |
+| 2 | 无 displayTitle | 回退 `title` |
+| 3 | 缺字段 | `title`/`cwd` 均为 `undefined`，不抛错 |
+| 4 | 空 / undefined 投影 | `sessionMetaOf(undefined)` / `({})` / `({byId:undefined})` 均返回 `{}` |
+
+> 为什么是纯函数：设置面板需要会话元数据，但组件内**禁止条件调用 hook**（v0.7.1/#310 铁律），
+> 故由 entry 层同步取快照（`sessions.list.getSnapshot()`）后经此函数算出普通对象传入。
+
 ### 1.4 产物门禁（`scripts/build.mjs` 内）
 
 构建后自动断言（失败即构建失败，进不了安装环节）：
@@ -129,6 +146,6 @@ node scripts/e2e-3082.mjs
 ## 4. 故障排查指引
 
 - 单测红 → 改代码后先 `pnpm check` 全绿再谈安装。
-- e2e 版本不匹配 → 服务加载的是旧 bundle：确认插件为 link 安装且已重启，
-  运行 `pnpm verify:installed` 看安装目录版本。
+- e2e 版本不匹配 → 服务加载的是旧 bundle：确认已装最新 tgz（升版本号重打包 + `plugin add`）
+  且已重启，运行 `pnpm verify:installed` 看安装目录版本。
 - e2e 连不上 → 先看设置 → 定时发送 的 host 在线状态；`journalctl --user -u dsh-dev-web` 查崩溃。

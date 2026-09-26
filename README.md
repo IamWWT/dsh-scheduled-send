@@ -29,26 +29,33 @@
   面板不再空白；构建门禁内置"组件注册形态"断言防回归。
 - **持久化**：任务表落 `<stateDir>/jobs.json`，重启不丢。
 
-## 安装（v0.6.0 起带门禁，坏布局在装进 profile 前就被拦）
+## 安装（tgz 唯一方式，带门禁；坏布局在装进 profile 前就被拦）
 
-开发迭代期**只推荐 link 安装**，一条命令完成【构建门禁 → 冒烟 → 重装 → 安装后验证】：
+**一律 tgz 安装，不使用 link 安装**（用户决策 2026-09-23；profile 内全部自研插件已转为 tgz，
+`link:` 归零）。每次重打包**必须升版本号**，因为源码改动不再热生效：
 
 ```bash
 cd dsh-plugins/dsh-scheduled-send
-pnpm install:dev        # = bash scripts/install-to-dsh.sh（不自动重启）
-systemctl --user restart dsh-dev-web      # 你自己确认后再重启
+pnpm check && npm pack                              # 门禁构建 + 冒烟 + 打包
+dsh-dev plugin --profile web add "$PWD/dsh-scheduled-send-<版本>.tgz"
+systemctl --user restart dsh-dev-web                 # 你自己确认后再重启
 ```
 
-日常迭代：改源码 → `pnpm install:dev`（或 `pnpm build` + `pnpm verify:installed`）→
-`systemctl --user restart dsh-dev-web`。
+日常迭代：改源码 → **升版本号（四处同步，见 AGENTS.md）** → `pnpm check` → `npm pack`
+→ `plugin add <tgz>` → 重启 → 刷新 3082。
 
-tgz 方式仅保留给稳定版分发，且**必须升版本号**再 pack（见下方缓存陷阱）。
+`pnpm install:dev`（= `bash scripts/install-to-dsh.sh`）当前仍是**源码目录 link 安装**流程
+（构建门禁→冒烟→rm 旧→link→安装后验证，不自动重启），与该 tgz 纪律不一致——**本轮文档审计
+发现，交维护者改造为 tgz 流程**；在脚本改造完成前，请按上方 tgz 命令安装。
+
+> 为什么不用 link：link 安装让"磁盘新/进程旧"、依赖借外部目录（曾软链到已改名的
+> `dsh-personal-workbench`，导致 check 与一键安装脚本双双失效）等耦合问题难以察觉。
 
 ### 三道"防坏安装"门禁（为什么会反复弄坏的根治）
 
 | # | 门禁 | 何时触发 | 说明 |
 |---|---|---|---|
-| 1 | 顶层布局卫生 | `pnpm build` | 源码目录出现顶层 `index.ts`/`client.js`/`build.mjs`/`client/`/`host/` 或 `node_modules` 软链 → 构建直接失败（这些会随 link 安装污染 profile） |
+| 1 | 顶层布局卫生 | `pnpm build` | 源码目录出现顶层 `index.ts`/`client.js`/`build.mjs`/`client/`/`host/` 或 `node_modules` 软链 → 构建直接失败（这些会污染安装进 profile 的目录布局） |
 | 2 | 产物可加载 | `pnpm build` | lib/ 双产物存在且非空；host 动态 import 断言导出 `Scheduler/VERSION/apply/inject/name` 且 `inject` 含 `webServer`；client 检查 `__ModuleLoader__`/插件 id/关键插槽 |
 | 3 | 安装后验证 | `pnpm verify:installed`（`install:dev` 自动执行） | 对真实安装目录（默认 `~/.dsh-dev/profiles/web/node_modules/dsh-scheduled-send`）检查 package.json.main 指向的文件存在可加载、无扁平残留 |
 
@@ -85,9 +92,9 @@ Cannot find module '.../node_modules/dsh-scheduled-send/lib/index.js'
 
 对策（按可靠度排序）：
 
-1. **改用 link 安装**（开发期首选，彻底绕开 tgz/store）；
-2. 每次重打包都**升版本号**（同步改 tgz 文件名、`package.json` 的 `version`、
-   `src/index.ts` 的 `VERSION` 常量）；
+1. **每次重打包都升版本号**（同步改 tgz 文件名、`package.json` 的 `version`、
+   `src/index.ts` 的 `VERSION` 常量）——tgz 安装下这是唯一手段；
+2. 或先 `dsh-dev plugin --profile web rm dsh-scheduled-send` 再 `add`，强制重新解压；
 3. 装完**必须验证**：`pnpm verify:installed`（或对照门禁 3 的手工检查）。
 
 ## 使用
@@ -136,7 +143,7 @@ dsh-scheduled-send/
 │   ├── build.mjs         # esbuild 双产物 + 产物门禁（顶层卫生 / 可加载断言）+ tsc
 │   ├── typecheck.mjs     # tsc --noEmit（host + client）
 │   ├── verify-installed.mjs   # 安装后验证器（缺 lib/ / 扁平残留就地拦截）
-│   ├── install-to-dsh.sh      # 一键 link 安装（构建门禁→冒烟→rm 旧→install→验证；不自动重启）
+│   ├── install-to-dsh.sh      # 一键安装（构建门禁→冒烟→rm 旧→安装→验证；不自动重启）
 │   └── e2e-3082.mjs          # 3082 在线 API 端到端（重启后运行；幂等，不碰真实会话）
 ├── src/
 │   ├── index.ts          # host 入口（inject=["webServer"] + 注册路由 + 启动 scheduler）
@@ -156,13 +163,29 @@ dsh-scheduled-send/
 └── docs/                 # REQUIREMENTS（需求）+ TROUBLESHOOTING（排障）+ TESTING（测试）· AGENTS/CHANGELOG
 ```
 
-## 版本适配（兼容性矩阵）
+## 环境支持矩阵（强制）
+
+对照行为基准：[`../docs/ENV-COMPATIBILITY.md`](../docs/ENV-COMPATIBILITY.md) §3。
+
+| 环境 | ubuntu-4090 | windows-lite | 备注 |
+|---|---|---|---|
+| `dsh-scheduled-send` | 全量 | 全量（纯前端 / 轻后端） | 无 Python / 本地模型 / 数据库依赖；持久化是 `jobs.json` 文件 |
+
+- **ubuntu-4090**：源码树 + systemd（3082），本插件入口、dock、设置面板与到点投递全量可用。
+- **windows-lite**：源码树 + `dsh-dev` 方式（手动启动，无 systemd）。功能全量可用；
+  差异仅在**进程管理**——Windows 无 systemd，定时器跑在 dsh host 进程内，
+  所以「离开电脑仍触发」的前提是 **dsh 进程保持运行**（关掉 dsh 则不会触发，
+  与 ubuntu 上停掉 `dsh-dev-web` 语义相同）。
+- **数据层**：本插件不依赖 MySQL/SQLite，状态落在 `<stateDir>/jobs.json`（DSH_HOME 内），
+  两环境行为一致。
+
+## 文档索引
 
 - [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) —— 需求记录（每轮反馈 → 设计决策 → 实现落点）
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) —— 事故与排障记录
 - [`docs/TESTING.md`](docs/TESTING.md) —— **测试文档**（单元 / 产物门禁 / 端到端 / 手工验收清单）
 - [`CHANGELOG.md`](CHANGELOG.md) —— 版本变更记录
-- [`AGENTS.md`](AGENTS.md) —— 本插件开发约定（工作区规范见根 `AGENTS.md`）
+- [`AGENTS.md`](AGENTS.md) —— 本插件开发约定（工作区规范见 `../AGENTS.md`）
 
 
 ## 版本适配（兼容性矩阵）
@@ -186,12 +209,18 @@ dsh-scheduled-send/
 - **任务创建被拒"最多 3 个"**：每个会话最多 3 个待触发任务，先在设置里撤回/删除。
 - **提示"今天只能定当前时刻之后"**：今天已过该时刻，改选「明天」（明天可定 0–24 点）。
 - **投递失败记 `missed` + error**：多为会话已删除或 `sessionController` 暂时不可用，任务不会重投——可重新创建。
-- **设置面板里看不到"定时发送"入口**：确认插件已安装（link 或 tgz）且 dsh 已重启；DevTools → Console 过滤 `scheduled-send`。
-- **启动即崩 `Cannot find module '.../dsh-scheduled-send/lib/index.js'`**：pnpm store 缓存了旧 tgz 解压产物（见上方"缓存陷阱"）；开发期直接改 link 安装（`pnpm install:dev` 自带安装后验证）。
+- **设置面板里看不到"定时发送"入口**：确认插件已安装（tgz）且 dsh 已重启；DevTools → Console 过滤 `scheduled-send`。
+- **启动即崩 `Cannot find module '.../dsh-scheduled-send/lib/index.js'`**：pnpm store 缓存了旧 tgz 解压产物（见上方"缓存陷阱"）；升版本号重打包，或先 `plugin rm` 再 `add`（`pnpm install:dev` 自带安装后验证）。
 - **启动即崩 `cannot get property "webServer" without inject`**：`src/index.ts` 缺少 `export const inject = ["webServer"]` 声明（cordis 上下文代理对未声明属性直接抛错）。
 - 完整排障记录：`docs/TROUBLESHOOTING.md`。
 <!-- deepseek-shared-layout -->
 
 ## Windows / Ubuntu 共用目录
 
-本项目遵循 [DeepSeek 共用目录约定](../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)。管理根统一写作 `<DEEPSEEK_ROOT>`（`.../deepseek/`），历史部署记录不能视为当前机器状态；Bash/systemd 命令只适用于对应环境，配置文件中的路径须在本机解析。
+本项目遵循 [DeepSeek 共用目录约定](../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)。管理根统一写作 `<DEEPSEEK_ROOT>`（`.../deepseek/`），历史部署记录不能视为当前机器状态；Bash/systemd 命令只适用于对应环境（systemd 仅 `ubuntu-4090`；`windows-lite` 手动启动 dsh），配置文件中的路径须在本机解析。
+
+## 仓库归属
+
+本插件是 **`IamWWT/dsh-plugins`（private monorepo）** 的子包 —— 该 monorepo 是全部自研代码的
+唯一仓库；工作区根 `deepseek/` 只含 `deepseek-harness/`（上游，只读）+ `dsh-plugins/`（本仓）。
+分支模型：`main`（集成）/ `ubuntu`（agent 开发）/ `windows`（用户）。

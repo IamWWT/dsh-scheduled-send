@@ -1,5 +1,8 @@
-版本策略：开发期以源码 link 安装为主（`pnpm install:dev`），每次发布新版本**必须**同步
+版本策略：安装一律走 **tgz**（`pnpm check` → `npm pack` → `dsh-dev plugin --profile web add <tgz>`，
+重打包必须升版本号；**不使用 link 安装**），每次发布新版本**必须**同步
 `package.json.version` / `src/index.ts` VERSION / tgz 文件名 / 文档提及（四处一致）。
+
+> 仓库：本插件是 `IamWWT/dsh-plugins`（private monorepo）的子包——全部自研代码的唯一仓库。
 
 ## 0.7.3 — 2026-09-24 跨平台构建：`pnpm check` 在 Windows / Ubuntu 都真正可跑
 
