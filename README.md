@@ -47,7 +47,7 @@ DSH_HOME=~/.dsh-dev pnpm dsh plugin --profile web add \
 
 - 装完核对 `~/.dsh-dev/profiles/web/node_modules/dsh-scheduled-send/lib` 真实存在；`pnpm verify:installed` 做同一检查。
 - **重打包必须升版本号**（四处同步，见 [AGENTS.md](AGENTS.md)）：pnpm 对 `file:` tgz 按 lockfile integrity 判「已最新」并缓存解压产物，同版本重打包会残留缺 `lib/` 的旧布局（症状：启动即 `Cannot find module '.../lib/index.js'`）。对策：升版本号，或先 `plugin rm dsh-scheduled-send` 再 `add`，装完必跑 `pnpm verify:installed`。
-- 重启 3082 **需用户同意**：`systemctl --user restart dsh-dev-web`；windows-lite 退出重开桌面应用。
+- 重启 3082 **需用户同意**：`systemctl --user restart dsh-dev-web`；windows-lite 托盘退出后重开桌面应用。
 - `pnpm install:dev`（= `bash scripts/install-to-dsh.sh`）当前仍是**源码目录 link 安装**流程（构建门禁→冒烟→rm 旧→link→安装后验证，不自动重启），与 tgz 纪律不一致；脚本改造前请按上方 tgz 命令安装。
 
 ## 构建与验证
