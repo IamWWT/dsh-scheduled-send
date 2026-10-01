@@ -47,7 +47,7 @@ DSH_HOME=~/.dsh-dev pnpm dsh plugin --profile web add \
 
 - 装完核对 `~/.dsh-dev/profiles/web/node_modules/dsh-scheduled-send/lib` 真实存在；`pnpm verify:installed` 做同一检查。
 - **重打包必须升版本号**（四处同步，见 [AGENTS.md](AGENTS.md)）：pnpm 对 `file:` tgz 按 lockfile integrity 判「已最新」并缓存解压产物，同版本重打包会残留缺 `lib/` 的旧布局（症状：启动即 `Cannot find module '.../lib/index.js'`）。对策：升版本号，或先 `plugin rm dsh-scheduled-send` 再 `add`，装完必跑 `pnpm verify:installed`。
-- 重启 3082 **需用户同意**：`systemctl --user restart dsh-dev-web`；windows-lite 手动重启 dsh 进程。
+- 重启 3082 **需用户同意**：`systemctl --user restart dsh-dev-web`；windows-lite 退出重开桌面应用。
 - `pnpm install:dev`（= `bash scripts/install-to-dsh.sh`）当前仍是**源码目录 link 安装**流程（构建门禁→冒烟→rm 旧→link→安装后验证，不自动重启），与 tgz 纪律不一致；脚本改造前请按上方 tgz 命令安装。
 
 ## 构建与验证
@@ -76,8 +76,8 @@ pnpm e2e                # = node scripts/e2e-3082.mjs：3082 在线 API 端到�
 
 | 环境 | 支持度 | 验证状态 |
 |---|---|---|
-| `ubuntu-4090`（源码树 + systemd 3082） | 全量 | 入口、dock、设置面板与到点投递全量可用；本版（0.7.4）实机验收**未记录 → 未验证** |
-| `windows-lite`（源码树 + `dsh-dev` 手动启动，无 systemd） | 全量 | 功能全量；差异仅在**进程管理**——无 systemd，定时器跑在 dsh host 进程内，「离开电脑仍触发」的前提是 dsh 进程保持运行；**未验证** |
+| `ubuntu-4090`（源码构建 + systemd 3082） | 全量 | 入口、dock、设置面板与到点投递全量可用；本版（0.7.4）实机验收**未记录 → 未验证** |
+| `windows-lite`（官方桌面版 profile `desktop`，无 systemd） | 全量 | 功能全量；差异仅在**进程管理**——无 systemd，定时器跑在 dsh host 进程内，「离开电脑仍触发」的前提是 dsh 进程保持运行；**未验证** |
 
 - 数据层：不依赖 MySQL/SQLite，状态落 `<stateDir>/jobs.json`（DSH_HOME 内），两环境行为一致；无 Python / 本地模型依赖。
 - 兼容基线：Node `^22.19.0 || >=24.0.0`（与 deepseek-harness `engines` 一致）；host 产物 target es2022；浏览器需支持 ES2022 / `fetch` / `AbortController` / `datetime-local`；要求当前 deepseek-harness 基线（依赖 `sessionController.prompt({mode:'queue'})`、插槽 `conversation.input.right` 与 `settings.section`、客户端服务 `sessions.open(id)`、host 服务 `webServer`）。
