@@ -10,7 +10,7 @@
 ## 根因分析（设置面板空白）
 
 **证据链**：
-1. `docs/REQUIREMENTS.md` 与源码：`settings.section` 注册在 `entry.ts` 为
+1. `docs/需求/BRD-业务需求说明书.md` 与源码：`settings.section` 注册在 `entry.ts` 为
    `(props) => { ...; return (ui.SettingsSection)({ ...props, ... }) }`——
    **把组件函数当作普通函数直接调用**，而不是 `React.createElement(ui.SettingsSection, props)`。
 2. React 规则：组件必须经 createElement 渲染，其内 `useState/useEffect/useSessions` hooks

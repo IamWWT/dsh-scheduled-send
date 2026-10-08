@@ -70,7 +70,7 @@ pnpm e2e                # = node scripts/e2e-3082.mjs：3082 在线 API 端到�
 | 3 | 安装后验证 | `pnpm verify:installed` | 对真实安装目录检查 `package.json.main` 指向的文件存在可加载、无扁平残留 |
 
 - 类型检查跨平台：`scripts/paths.mjs` 依次探测 `env → 同级 deepseek-harness → <DSH_HOME>/profiles/node_modules → <DSH_HOME>/profiles/<profile>/node_modules` 收集 `@types`（并补探 pnpm 虚拟 store），由 `scripts/build.mjs` 以 `--typeRoots` 注入 tsc，经 `process.execPath` 启动。**干净克隆即可 `pnpm check`**，无需先 `pnpm install`（本插件按布局红线不往版本库放 `node_modules`）。
-- 升级 dsh 或新增同 profile 插件后：`pnpm check` + `pnpm verify:installed` + `node scripts/e2e-3082.mjs`，再按 [docs/TESTING.md](docs/TESTING.md) 手工清单验收。
+- 升级 dsh 或新增同 profile 插件后：`pnpm check` + `pnpm verify:installed` + `node scripts/e2e-3082.mjs`，再按 [`docs/测试/FTR-测试指南.md`](`docs/测试/FTR-测试指南.md`) 手工清单验收。
 
 ## 环境支持矩阵
 
@@ -86,11 +86,11 @@ pnpm e2e                # = node scripts/e2e-3082.mjs：3082 在线 API 端到�
 
 | 文件 | 一句话 |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | 需求记录（每轮反馈 → 设计决策 → 实现落点） |
-| [docs/TESTING.md](docs/TESTING.md) | 测试文档：单元 / 产物门禁 / 端到端 / 手工验收清单 |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 事故与排障记录 |
-| `docs/specs/001-complete-feature/` | 首发完整功能规格（SDD 三件套） |
-| `docs/specs/20260925-experience/` | 布局/窄容器适配与键盘焦点优化规格 |
+| [`docs/需求/BRD-业务需求说明书.md`](`docs/需求/BRD-业务需求说明书.md`) | 需求记录（每轮反馈 → 设计决策 → 实现落点） |
+| [`docs/测试/FTR-测试指南.md`](`docs/测试/FTR-测试指南.md`) | 测试文档：单元 / 产物门禁 / 端到端 / 手工验收清单 |
+| [`docs/管理/RMP-风险管理.md`](`docs/管理/RMP-风险管理.md`) | 事故与排障记录 |
+| `docs/需求/` + `docs/管理/` 下同 id 文件 | 首发完整功能规格（SDD 三件套） |
+| `docs/需求/` + `docs/管理/` 下同 id 文件 | 布局/窄容器适配与键盘焦点优化规格 |
 | [AGENTS.md](AGENTS.md) | 本插件专属硬规则（插槽、inject、创建流程三保险、门禁） |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
 
@@ -100,4 +100,4 @@ pnpm e2e                # = node scripts/e2e-3082.mjs：3082 在线 API 端到�
 
 ## 附：仓库与共用目录
 
-唯一代码仓库 = `IamWWT/dsh-plugins`（private monorepo），本插件目录 `dsh-plugins/dsh-scheduled-send/`；分支 `main`（集成）/ `ubuntu`（agent 开发）/ `windows`（用户）。遵循 [DeepSeek 共用目录约定](../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)，管理根统一写作 `<DEEPSEEK_ROOT>`（`.../deepseek/`）；Bash/systemd 命令只适用于 `ubuntu-4090`。
+唯一代码仓库 = `IamWWT/dsh-plugins`（private monorepo），本插件目录 `dsh-plugins/dsh-scheduled-send/`；分支 `main`（集成）/ `ubuntu`（agent 开发）/ `windows`（用户）。遵循 [DeepSeek 共用目录约定](../../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)，管理根统一写作 `<DEEPSEEK_ROOT>`（`.../deepseek/`）；Bash/systemd 命令只适用于 `ubuntu-4090`。

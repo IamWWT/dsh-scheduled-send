@@ -31,7 +31,7 @@
 
 ## T3 需求与文档同步（README / REQUIREMENTS / TESTING）
 
-- **改动文件**：`README.md`、`docs/REQUIREMENTS.md`、`docs/TESTING.md`、`CHANGELOG.md`
+- **改动文件**：`README.md`、`docs/需求/BRD-业务需求说明书.md`、`docs/测试/FTR-测试指南.md`、`CHANGELOG.md`
 - **done**：记录 v0.7.0：设置面板空白根因（组件直接调用）与修复；手工验收清单补
   「设置面板内容可见」验证步骤；版本四处同步（package/VERSION/tgz/README）。
 - **验证**：`grep -rn "0.7.0" README.md docs package.json src` 四处一致。
