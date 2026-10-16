@@ -4,11 +4,11 @@
 
 - 文档性质：规格（现行需求与实现边界的单一事实源）
 - 对应版本：v0.7.4
-- 状态：有效（现行需求 / 边界 / 协作约定有效；逐版本过程流水已压为文末 §5「历史沿革」，版本细节见 `CHANGELOG.md`，事故复盘见 `TROUBLESHOOTING.md`）
+- 状态：有效（现行需求 / 边界 / 协作约定有效；逐版本过程流水已压为文末 §5「历史沿革」，版本细节见 `CHANGELOG.md`，事故复盘见 `docs/管理/RMP-风险管理.md`）
 - 维护者：AI + 用户
 
 > 本文件是需求演进的**单一事实源**：每轮用户反馈 → 设计决策 → 实现落点 → 验收方式。
-> 与 `TROUBLESHOOTING.md`（事故/排障）分工：这里记"要什么、为什么这么实现"。
+> 与 `docs/管理/RMP-风险管理.md`（事故/排障）分工：这里记"要什么、为什么这么实现"。
 
 ## 1. 原始需求（v0.1.0）
 
@@ -33,6 +33,10 @@
 | 定时器 | host 进程内 `setTimeout`（dsh 常驻） |
 | 持久化 | 插件自管 `<stateDir>/jobs.json` |
 
+> 注（2026-10-13）：上表 `useSessions` 已不再由本插件消费——会话元数据（标题 / cwd）改为
+> `entry.ts` 经 `sessions.list.getSnapshot()` 取同步快照（`src/shared/session-meta.ts` 折叠），
+> 因为组件内禁止条件调用 hook（见 §2.6）；`useInput` / `inputActions` 仍走插槽 standard props。
+
 ---
 
 ## 2. 现行需求与规格（历轮反馈沉淀的终态口径）
@@ -42,6 +46,10 @@
 - **主入口**：`conversation.input.right`（输入框工具行「⏰ 定时」）；会话由插槽注入，不需要用户记 sessionId。
 - **管理面板**：`settings.section`（id `scheduled-send`，`order: 11`；Vision Router 为 12，即在其右边），
   列出全部任务，支持 放大查看 / 打开会话 / 撤回 / 编辑内容 / 立即发。
+
+> 注（2026-10-13）：Vision Router（上游 `dsh-vision-router`，settings 段 order 12）**当前未装在本机
+> web profile**（`~/.dsh-dev/profiles/web/package.json` 无此依赖），"在其右边"只是 order 11 的原始设计参照；
+> order 11 本身仍是本插件的实际注册值（`src/client/entry.ts`）。
 - **输入区 dock**：`conversation.input.dock`（`order: 30`，与原生 QueueDock 同插槽），
   在输入区上方展示当前会话的 pending 任务：`⏰ HH:MM:SS 发送 · 剩余时间 · 内容预览 · 撤回`；无 pending 不渲染。
 - **时间选择形态**：浮层内竖排列表选择——`时 : 分 : 秒` 三段下拉（0–23 / 0–59 / 0–59）+ 今天 / 明天档位，
@@ -117,7 +125,7 @@
 - 客户端组件内**禁止条件调用 hook**（`typeof x === 'function' ? x(...) : ...` 也属于）；
   需要 standard hooks 数据时在组件顶层无条件调用，或由 entry 同步快照算好传入。
 - `settings.section` 必须以 `React.createElement(ui.SettingsSection, props)` 注册（组件必须经 createElement 渲染）；
-  构建门禁对"组件注册形态"做回归断言。三次「设置面板空白」的根因链见 `TROUBLESHOOTING.md`。
+  构建门禁对"组件注册形态"做回归断言。三次「设置面板空白」的根因链见 `docs/管理/RMP-风险管理.md`。
 - 凡 `ctx.get('sessions')`，必须把 `'sessions'` 写进客户端插件级 `inject`（`["slots","timer","sessions"]`）；
   宿主服务方法调用一律 `method.call(svc, ...)` 保 this。
 - host 路由读 body 必须传 `req`（`readBody(req)` / `readJsonBody(hreq)`），绝不传 `res`；
@@ -157,4 +165,4 @@
 - **v0.7.0–v0.7.3**：设置面板空白三层根因（组件直接函数调用 → 条件 hook → JobList hooks 顺序）逐一修复并补回归测试；
   跨平台 `pnpm check` 修复（ESM 盘符路径、typeRoots、tsc 启动方式）。
 - **v0.7.4**：页面布局 / 窄容器适配 / 键盘焦点体验优化（范围与验证见 `docs/需求/` + `docs/管理/` 下同 id 文件）；
-  本次 docs 终态化（需求流水压为本节，事故细节见 `TROUBLESHOOTING.md`）。
+  本次 docs 终态化（需求流水压为本节，事故细节见 `docs/管理/RMP-风险管理.md`）。

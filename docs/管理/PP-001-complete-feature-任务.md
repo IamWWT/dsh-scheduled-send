@@ -29,7 +29,7 @@
   ② 不允许 `(ui.SettingsSection)(` 直接调用模式（防回归到本次根因）。
 - **验证**：故意把 entry 改回直接调用 → `pnpm build` 应失败（exit 1）；改回组件化 → 通过。
 
-## T3 需求与文档同步（README / REQUIREMENTS / TESTING）
+## T3 需求与文档同步（README / BRD-业务需求说明书 / FTR-测试指南）
 
 - **改动文件**：`README.md`、`docs/需求/BRD-业务需求说明书.md`、`docs/测试/FTR-测试指南.md`、`CHANGELOG.md`
 - **done**：记录 v0.7.0：设置面板空白根因（组件直接调用）与修复；手工验收清单补

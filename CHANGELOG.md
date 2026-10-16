@@ -1,6 +1,6 @@
 ## 0.7.4 — 2026-09-25
 
-改进插件页面布局、窄容器适配与键盘焦点；具体范围和验证见 docs/specs/20260925-experience/。
+改进插件页面布局、窄容器适配与键盘焦点；具体范围和验证见 `docs/需求/BRD-20260925-experience.md` 与 `docs/管理/PP-20260925-experience-计划.md`（原 `docs/specs/20260925-experience/` 目录已不存在）。
 
 版本策略：安装一律走 **tgz**（`pnpm check` → `npm pack` → `dsh-dev plugin --profile web add <tgz>`，
 重打包必须升版本号；**不使用 link 安装**），每次发布新版本**必须**同步
@@ -87,7 +87,7 @@ React 要求 hooks 数量/顺序跨渲染**恒定**；standard props（useSessio
   对照：dock/⏰ 标识直接传组件引用（框架 createElement）因此正常，设置面板是唯一错误形态。
 - **构建门禁防回归**：`build.mjs` 新增组件注册形态断言——禁止 `SettingsSection)(` 直接调用、
   必须 `createElement(ui.SettingsSection`；已实测改回直接调用 → 构建失败。
-- **按 SDD 完整闭环**：`docs/specs/001-complete-feature/`（spec/plan/tasks）冻结完整需求与验收
+- **按 SDD 完整闭环**：`docs/需求/BRD-001-complete-feature.md` 与 `docs/管理/PP-001-complete-feature-计划.md`／`-任务.md`（原 `docs/specs/001-complete-feature/` 目录已不存在）冻结完整需求与验收
   标准（A1–A8），经用户确认后实现；dock 范围确认=当前会话。
 ## 0.6.2 — 2026-09-11
 

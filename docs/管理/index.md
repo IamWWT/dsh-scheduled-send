@@ -17,5 +17,5 @@ date: 2026-10-08
 
 | 前缀 | 交付物 | 文件 |
 |---|---|---|
-| `PP-` | 项目计划 | [[PP-001-complete-feature-任务|PP-001-complete-feature-任务]]、[[PP-001-complete-feature-计划|PP-001-complete-feature-计划]]、[[PP-20260925-experience-任务|PP-20260925-experience-任务]]、[[PP-20260925-experience-计划|PP-20260925-experience-计划]] |
-| `RMP-` | 风险管理 | [[RMP-风险管理|RMP-风险管理]] |
+| `PP-` | 项目计划 | [[管理/PP-001-complete-feature-任务|PP-001-complete-feature-任务]]、[[管理/PP-001-complete-feature-计划|PP-001-complete-feature-计划]]、[[管理/PP-20260925-experience-任务|PP-20260925-experience-任务]]、[[管理/PP-20260925-experience-计划|PP-20260925-experience-计划]] |
+| `RMP-` | 风险管理 | [[管理/RMP-风险管理|RMP-风险管理]] |

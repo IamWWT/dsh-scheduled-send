@@ -26,9 +26,9 @@ date: 2026-10-08
 
 | 文件 | wikilink |
 |---|---|
-| `BRD-001-complete-feature.md` | [[BRD-001-complete-feature]] |
-| `BRD-20260925-experience.md` | [[BRD-20260925-experience]] |
-| `BRD-业务需求说明书.md` | [[BRD-业务需求说明书]] |
+| `BRD-001-complete-feature.md` | [[需求/BRD-001-complete-feature]] |
+| `BRD-20260925-experience.md` | [[需求/BRD-20260925-experience]] |
+| `BRD-业务需求说明书.md` | [[需求/BRD-业务需求说明书]] |
 
 ## docs/ 测试
 
@@ -36,7 +36,7 @@ date: 2026-10-08
 
 | 文件 | wikilink |
 |---|---|
-| `FTR-测试指南.md` | [[FTR-测试指南]] |
+| `FTR-测试指南.md` | [[测试/FTR-测试指南]] |
 
 ## docs/ 管理
 
@@ -44,8 +44,16 @@ date: 2026-10-08
 
 | 文件 | wikilink |
 |---|---|
-| `PP-001-complete-feature-任务.md` | [[PP-001-complete-feature-任务]] |
-| `PP-001-complete-feature-计划.md` | [[PP-001-complete-feature-计划]] |
-| `PP-20260925-experience-任务.md` | [[PP-20260925-experience-任务]] |
-| `PP-20260925-experience-计划.md` | [[PP-20260925-experience-计划]] |
-| `RMP-风险管理.md` | [[RMP-风险管理]] |
+| `PP-001-complete-feature-任务.md` | [[管理/PP-001-complete-feature-任务]] |
+| `PP-001-complete-feature-计划.md` | [[管理/PP-001-complete-feature-计划]] |
+| `PP-20260925-experience-任务.md` | [[管理/PP-20260925-experience-任务]] |
+| `PP-20260925-experience-计划.md` | [[管理/PP-20260925-experience-计划]] |
+| `RMP-风险管理.md` | [[管理/RMP-风险管理]] |
+
+## docs/ history（历史归档）
+
+> 已从现状类文档删除的过期叙述原文；非现行操作手册。
+
+| 文件 | wikilink |
+|---|---|
+| `归档-20261013.md` | [[history/归档-20261013|归档-20261013]] |

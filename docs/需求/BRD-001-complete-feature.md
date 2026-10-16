@@ -78,3 +78,7 @@
 - 风险：settings.section 为 root 作用域，`useSessions` 走 GlobalStandardProps（已核实可用）；
   组件注册形态是当前空白主因（已取证：直接调用 vs createElement）
 - 兼容：Vision Router order 12；与其他插件无冲突（本插件 order 11）
+
+> 注（2026-10-13）：本文件为当时口径，除下列两点外保留不改。
+> ① Vision Router（上游 `dsh-vision-router`）当前**未装在本机 web profile**（`~/.dsh-dev/profiles/web/package.json` 无此依赖），"order 12"仅当时排序参照；order 11 仍是本插件实际注册值。
+> ② §2 / §7 列的 `useSessions` hook 自 v0.7.1 起不再由本插件消费——会话元数据改由 `entry.ts` 经 `sessions.list.getSnapshot()` 取同步快照（现行口径见 [../需求/BRD-业务需求说明书.md](../需求/BRD-业务需求说明书.md) §1 注与 §2.6）。

@@ -4,7 +4,7 @@
 
 - 文档性质：操作手册（排障知识库：现象 → 根因 → 修复 → 预防）
 - 对应版本：v0.7.4
-- 状态：有效（各条根因、修复与速查结论现行有效；条目按当时版本记录，其中 `MAX_SCHEDULE_HOURS = 20`、"今天已过自动顺延"等属**历史口径**，现行时间规则见 `REQUIREMENTS.md` §2.2）
+- 状态：有效（各条根因、修复与速查结论现行有效；条目按当时版本记录，其中 `MAX_SCHEDULE_HOURS = 20`、"今天已过自动顺延"等属**历史口径**，现行时间规则见 `../需求/BRD-业务需求说明书.md` §2.2）
 - 维护者：AI + 用户
 
 ## 2026-09-10 装包后 3082 崩溃循环（两连击）
@@ -53,6 +53,10 @@ systemctl --user restart dsh-dev-web
 export const inject = ["webServer"];   // webServer 由 @deepseek-ai/dsh-host-webserver 提供
 ```
 
+> 注（2026-10-13）：括注中的 `dsh-troubleshoot-workbench` 已于 2026-10-01 退役移除
+> （见 [../../../readme.md](../../../readme.md)「已退役」条），`dsh-personal-workbench` 亦非本机 web profile 依赖；
+> 该对照只是当时的写法来源，**本插件的判据是下面的"约定"**。
+
 **约定**：本插件 host 端凡是 `ctx.<prop>` 直接取用的服务（目前仅 `webServer`；
 `ctx.get(...)` / `ctx.effect` 是 Context 实例方法，无需声明），都必须在
 `inject` 数组里登记。新增对其它 ctx 属性的直接访问时同步补声明。
@@ -96,7 +100,7 @@ export const inject = ["webServer"];   // webServer 由 @deepseek-ai/dsh-host-we
 
 ## 2026-09-10 v0.4.0 三项修正
 
-用户反馈三条，均已落地（设计决策详见 `REQUIREMENTS.md`）：
+用户反馈三条，均已落地（设计决策详见 `../需求/BRD-业务需求说明书.md`）：
 
 1. **配色与 DSH 主题不一致（浅色主题下浮层是黑块）**
    - 根因：CSS 写死深色（`background:#1d2126`、`#3b82f6`、`#888` 等字面色值），不随主题切换。
@@ -276,5 +280,5 @@ properties of undefined (reading 'manager')"。
 - **2026-09-11（v0.6.1）**：「打开会话」二次根因——client 插件 `inject` 漏 `'sessions'`；补三层防再犯。
 
 > 后续 v0.7.0–v0.7.2「设置面板空白」三层根因链（组件直接函数调用 → 条件 hook → JobList hooks 顺序漂移）
-> 的过程流水记在 `CHANGELOG.md` 与 `REQUIREMENTS.md` §2.6 / §5，本文件不再复述。
+> 的过程流水记在 `CHANGELOG.md` 与 `../需求/BRD-业务需求说明书.md` §2.6 / §5，本文件不再复述。
 

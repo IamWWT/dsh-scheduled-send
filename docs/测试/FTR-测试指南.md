@@ -53,6 +53,10 @@ node scripts/e2e-3082.mjs  # 3082 在线 API 端到端（需重启后）
 | `GET /jobs` | 空表、列表形状 |
 | `POST /jobs` 新建 | 缺 sessionId / 缺 text / fireAt 过去 / 超明天结束 均拒绝；正常创建 pending；每会话第 4 个被拒 |
 | `POST /jobs` 更新 | **仅 `{id,text}` 可更新**（真实客户端形态，v0.6.0 修复）；空 text 拒绝；无 text 无 fireAt 拒绝 |
+
+> 注（2026-10-13）：上表行 4 描述的是**真实客户端**的编辑请求形态；host 侧 `POST /jobs` 的 update 分支
+> 实际接受"至少给 `text` 或 `fireAt` 之一"（`src/host/routes.ts` 的 `if (body.id)` 分支），`note` /
+> `sessionTitle` 亦可更新——测试未覆盖 `{id,fireAt}` 这一路。
 | `POST /jobs/fire` | mock prompt 被调用、`mode:queue`、读取更新后的文本 |
 | `POST /jobs/cancel` / `delete` | 状态流转 + 移除 |
 | 非法 JSON / 不支持方法 | 400 / 405 |
@@ -106,7 +110,8 @@ JobList 两次（jobs=[] → 有数据），边界捕获 #310 即失败。已实
 
 - 顶层布局卫生：无 `index.ts`/`client.js`/`build.mjs`/`client/`/`host/` 残留、无 `node_modules` 软链；
 - `lib/index.js` 可动态 import，导出 `Scheduler/VERSION/apply/inject/name`，`inject` 含 `webServer`；
-- `lib/client.js` 含 `__ModuleLoader__`、插件 id、`conversation.input.right`、`settings.section`。
+- `lib/client.js` 含 `__ModuleLoader__`、插件 id、`conversation.input.right`、`conversation.input.dock`、`settings.section`；
+- `lib/client.js` 的 `settings.section` 必须以 `createElement(ui.SettingsSection, …)` 形态注册（禁止直接函数调用，v0.7.0 回归项）。
 
 ## 2. 端到端测试
 
@@ -139,6 +144,10 @@ node scripts/e2e-3082.mjs
 | 10 | 「撤回」后回列表 | 状态变 cancelled，不再发送 |
 | 11 | 到点验证 | 目标会话 QueueDock 出现该消息（若 agent 运行则排队等待消费） |
 | 12 | 重启 dsh 后未触发任务 | 仍 pending，到点自动补投（可查看 `jobs.json`） |
+
+> 注（2026-10-13）：步骤 1 的"Vision Router 左侧"只是原始定位参照——Vision Router（上游
+> `dsh-vision-router`）**当前未装在本机 web profile**（`~/.dsh-dev/profiles/web/package.json` 无此依赖）。
+> 判据以"输入框工具行出现「⏰ 定时」"为准（插槽 `conversation.input.right`，order 0）。
 
 ## 3. 已知盲区 / 说明
 

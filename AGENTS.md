@@ -15,8 +15,8 @@ dsh 原生排队机制（`sessionController.prompt({mode:'queue'})` → Inbox `n
 
 - **版本四处同步**：`package.json.version` = `src/index.ts` 的 `VERSION` = tgz 文件名 = README 提及。
   改版本后自检：`grep -rn "0\.x\.y" README.md docs package.json src`
-- **入口插槽**：主入口 `conversation.input.right`（输入框 ⏰ 定时）；管理面板 `settings.section`（order 11，
-  Vision Router 在 12，保证在其左边）。**`sessionId` 必须由注册时 `inject(sessionId)` 位置参数注入**
+- **入口插槽**：主入口 `conversation.input.right`（输入框 ⏰ 定时）；管理面板 `settings.section`（order 11）。
+  **`sessionId` 必须由注册时 `inject(sessionId)` 位置参数注入**
   （v0.4.0 曾误删导致按钮 disabled → 点击无反应，见 `docs/管理/RMP-风险管理.md`）。
 - **客户端服务注入**：凡 `ctx.get('sessions')` 必须把 `'sessions'` 写进插件级 `inject`
   （`inject: ["slots","timer","sessions"]`；v0.6.0/v0.6.1「打开会话」两次故障根因，见 `docs/管理/RMP-风险管理.md`）。
@@ -29,7 +29,9 @@ dsh 原生排队机制（`sessionController.prompt({mode:'queue'})` → Inbox `n
 - **配置键必须被消费**：`cordis.patch.yml` 只声明 `stateDir`；新增配置先实现再声明
   （曾有过 markMissed/refreshMs 纸面配置，已删）。
 - **产物门禁**：`scripts/build.mjs` 构建后断言 host 导出齐全（Scheduler/VERSION/apply/inject/name，
-  inject 含 webServer）与 client 注册（__ModuleLoader__/插件 id/两个插槽）。
+  inject 含 webServer）与 client 注册（`__ModuleLoader__` / 插件 id / 三个插槽：
+  `conversation.input.right`、`conversation.input.dock`、`settings.section`；且 `settings.section`
+  必须是 `createElement(ui.SettingsSection, …)` 形态，禁止直接函数调用）。
 - **安装必须验证**：`pnpm install:dev`（link 安装 + verify-installed）或至少 `pnpm verify:installed`。
 - **重启 dsh 前必须征求用户同意**；install-to-dsh.sh 不自动重启。
 
