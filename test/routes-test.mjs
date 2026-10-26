@@ -1,13 +1,10 @@
 /**
  * dsh-scheduled-send — Host HTTP 路由单元测试（纯 Node，无外部依赖）。
  *
- * 覆盖 `src/host/routes.ts` 的全部端点，用 mock webServer 捕获 handler、
- * 用 EventEmitter 模拟 req/res 直接调用：
- *   GET  /health /jobs；POST /jobs（新建/更新）；/jobs/cancel /delete /fire；405。
- * 关键回归项：**readBody 必须读 req**（v0.5.0 卡死根因——若误传 res，handler 永不
- * resolve）。每个调用带 2s 超时守卫：handler 挂起即判定失败。
+ * 覆盖 0.8.0 端点：health / tasks / update / delete / delete-inactive / run / history，
+ * 以及精确路由上的宿主鉴权拒绝。readBody 仍直接读 req（历史上误传 res 会永久挂起）。
  *
- * 运行：node test/routes-test.mjs（pnpm test 会一并执行）
+ * 运行：node test/routes-test.mjs
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,270 +14,197 @@ import assert from "node:assert";
 
 const LIB = new URL("../lib/index.js", import.meta.url);
 const mod = await import(LIB.href);
-const { Scheduler, registerRoutes } = mod;
+const { ScheduleBridge, registerRoutes } = mod;
+assert.equal(typeof ScheduleBridge, "function");
+assert.equal(typeof registerRoutes, "function");
 
-const tmp = mkdtempSync(join(tmpdir(), "dss-route-"));
-const stateDir = join(tmp, "st");
+const stateDir = mkdtempSync(join(tmpdir(), "dss-routes-"));
 
-/** mock ctx：webServer 捕获 handler；sessionController 记录 prompt 调用。 */
-const promptCalls = [];
-const handlers = new Map(); // path -> handler
+function makeSchedule() {
+  const entries = [];
+  let seq = 0;
+  return {
+    entries,
+    async catalog() { return entries.map(e => ({ ...e })); },
+    async create(sessionId, request) {
+      seq += 1;
+      const record = {
+        id: `s-${seq}`,
+        kind: request.at === undefined ? "every" : "at",
+        title: request.title,
+        prompt: request.prompt,
+        scheduledAt: request.at ?? new Date(Date.now() + 3600_000).toISOString(),
+        ...(request.every_seconds === undefined ? {} : { everySeconds: request.every_seconds }),
+      };
+      entries.push({ ...record, sessionId, status: "active" });
+      return record;
+    },
+    async update() { return { id: "s-1", updated: false, code: "schedule_conflict" }; },
+    async delete(request) {
+      const i = entries.findIndex(e => e.id === request.id);
+      if (i === -1) return { id: request.id, deleted: false };
+      entries.splice(i, 1);
+      return { id: request.id, deleted: true };
+    },
+    async deleteInactive() {
+      const before = entries.length;
+      for (let i = entries.length - 1; i >= 0; i -= 1) if (entries[i].status !== "active") entries.splice(i, 1);
+      return { deleted: before - entries.length };
+    },
+    async history() {
+      return { records: [{ scheduledAt: new Date().toISOString(), deliveredAt: new Date().toISOString(), messageId: "m1" }] };
+    },
+  };
+}
+
+const schedule = makeSchedule();
+const prompts = [];
+const handlers = new Map();
 const ctx = {
   webServer: {
-    register: (spec) => { handlers.set(spec.path, spec.handler); return () => {}; },
+    register(spec) { handlers.set(spec.path, spec.handler); return () => {}; },
   },
-  get: (k) => (k === "sessionController" ? {
-    prompt: async (r) => { promptCalls.push(r); return { accepted: true }; },
-  } : undefined),
+  schedule,
+  sessionController: {
+    async create() { return { sessionId: "sess-created" }; },
+    async rename() { return {}; },
+    async prompt(r) { prompts.push(r); return {}; },
+  },
+  sessions: { get: () => undefined },
+  get() { return undefined; }, // 无 connection：本地测试放行
+  on() { return () => {}; },
 };
 
-const scheduler = new Scheduler({ stateDir, version: "test" });
-scheduler.attach(ctx);
-registerRoutes(ctx, scheduler, "0.6.0-test");
+const bridge = new ScheduleBridge(ctx, stateDir, "test");
+bridge.start();
+registerRoutes(ctx, bridge, "test");
 
-/** 断言 path 已注册。 */
-function assertRegistered(path) {
-  assert.ok(handlers.has(path), `路由未注册：${path}`);
-}
-
-/**
- * 调用一个 handler。带 2s 超时守卫——若 readBody 误传 res（handler 永不返回），
- * 这里直接失败，而不是让整个测试挂起。
- * @returns {Promise<{status:number, body:unknown}>}
- */
-async function invoke(path, { method = "GET", json } = {}) {
-  const handler = handlers.get(path);
-  assert.ok(handler, `handler 不存在：${path}`);
+function invoke(path, opts = {}) {
+  const handler = handlers.get(`/api/scheduled-send${path}`);
+  assert.equal(typeof handler, "function", `未注册路由 ${path}`);
   const req = new EventEmitter();
-  req.method = method;
-  let status = 0;
-  let bodyText = "";
+  req.method = opts.method ?? "GET";
+  req.headers = opts.headers ?? {};
+  req.destroy = () => {};
   const res = {
-    writeHead: (s) => { status = s; },
-    end: (b) => { bodyText = b; },
+    status: undefined,
+    body: "",
+    writeHead(status) { this.status = status; },
+    end(body) { this.body = body ?? ""; },
   };
-  const result = handler(req, res);
-  if (json !== undefined) {
-    const buf = Buffer.from(JSON.stringify(json));
-    queueMicrotask(() => {
-      req.emit("data", buf);
-      req.emit("end");
-    });
-  } else if (method === "POST") {
-    // POST 无 body 也应正常结束（空 body → 400）
-    queueMicrotask(() => req.emit("end"));
-  }
-  const timed = await Promise.race([
-    result.then(() => true),
-    new Promise((r) => setTimeout(() => r(false), 2000)),
-  ]);
-  assert.ok(timed, `handler 挂起超过 2s：${path}（疑似 readBody 传错对象？）`);
-  return { status, body: bodyText ? JSON.parse(bodyText) : null };
+  const done = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`路由 ${path} 挂起`)), 2000);
+    Promise.resolve(handler(req, res)).then(() => {
+      clearTimeout(timer);
+      let json;
+      try { json = res.body === "" ? undefined : JSON.parse(res.body); } catch { json = res.body; }
+      resolve({ status: res.status, body: json });
+    }, reject);
+  });
+  if (opts.json !== undefined) req.emit("data", Buffer.from(JSON.stringify(opts.json)));
+  req.emit("end");
+  return done;
 }
 
-let passed = 0;
-const ok = (name) => { passed += 1; console.log(`  PASS  ${name}`); };
-
-// ---- GET /health ----------------------------------------------------------
-assertRegistered("/api/scheduled-send/health");
+// 1) 健康检查
 {
-  const { status, body } = await invoke("/api/scheduled-send/health");
+  const { status, body } = await invoke("/health");
   assert.equal(status, 200);
   assert.equal(body.ok, true);
-  assert.equal(body.version, "0.6.0-test");
-  assert.equal(typeof body.pending, "number");
-  ok("GET /health 返回版本与统计");
+  assert.equal(body.scheduleService, true);
 }
 
-// ---- GET /jobs（空表）-----------------------------------------------------
-assertRegistered("/api/scheduled-send/jobs");
+// 2) 创建任务（工作区 → 建会话）
 {
-  const { status, body } = await invoke("/api/scheduled-send/jobs");
-  assert.equal(status, 200);
-  assert.equal(body.ok, true);
-  assert.deepEqual(body.jobs, []);
-  ok("GET /jobs 空表");
-}
-
-// ---- POST /jobs 新建（缺 sessionId）---------------------------------------
-{
-  const { body } = await invoke("/api/scheduled-send/jobs", {
+  const { status, body } = await invoke("/tasks", {
     method: "POST",
-    json: { text: "x", fireAt: Date.now() + 60000 },
-  });
-  assert.equal(body.ok, false);
-  assert.match(body.error ?? "", /sessionId/);
-  ok("POST /jobs 缺 sessionId → 拒绝");
-}
-
-// ---- POST /jobs 新建（缺 text）--------------------------------------------
-{
-  const { body } = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { sessionId: "s1", fireAt: Date.now() + 60000 },
-  });
-  assert.equal(body.ok, false);
-  assert.match(body.error ?? "", /text/);
-  ok("POST /jobs 缺 text → 拒绝");
-}
-
-// ---- POST /jobs 新建（fireAt 为过去）---------------------------------------
-{
-  const { body } = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { sessionId: "s1", text: "x", fireAt: Date.now() - 1000 },
-  });
-  assert.equal(body.ok, false);
-  assert.match(body.error ?? "", /晚于/);
-  ok("POST /jobs fireAt 过去 → 拒绝");
-}
-
-// ---- POST /jobs 新建（超出最晚边界：明天 23:59:59）-------------------------
-{
-  const { body } = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { sessionId: "s1", text: "x", fireAt: Scheduler.maxFireAt() + 1000 },
-  });
-  assert.equal(body.ok, false);
-  assert.match(body.error ?? "", /明天 23:59:59/);
-  ok("POST /jobs fireAt 超出明天结束 → 拒绝（maxFireAt 消费）");
-}
-
-// ---- POST /jobs 新建（正常）------------------------------------------------
-let created;
-{
-  const { status, body } = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { sessionId: "sess-e2e", text: "hello", fireAt: Date.now() + 3600_000 },
+    json: {
+      title: "构建检查",
+      prompt: "检查构建",
+      workspaceId: "ws-1",
+      frequency: { kind: "once", at: new Date(Date.now() + 600_000).toISOString() },
+    },
   });
   assert.equal(status, 200);
   assert.equal(body.ok, true);
-  assert.ok(body.job?.id);
-  assert.equal(body.job.status, "pending");
-  created = body.job;
-  ok("POST /jobs 新建成功（pending）");
+  assert.equal(body.task.title, "构建检查");
+  assert.equal(body.task.sessionId, "sess-created");
 }
 
-// ---- 每会话最多 3 个（经 HTTP 层）-----------------------------------------
+// 3) 列表
 {
-  let lastBody = null;
-  for (let i = 0; i < 2; i++) {
-    const r = await invoke("/api/scheduled-send/jobs", {
-      method: "POST",
-      json: { sessionId: "sess-e2e", text: `msg-${i}`, fireAt: Date.now() + 3600_000 + i },
-    });
-    lastBody = r.body;
-  }
-  const r4 = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { sessionId: "sess-e2e", text: "msg-4", fireAt: Date.now() + 3600_000 },
-  });
-  assert.equal(r4.body.ok, false);
-  assert.match(r4.body.error ?? "", /最多/);
-  ok("每会话最多 3 个：第 4 个经 HTTP 被拒");
-}
-
-// ---- POST /jobs 更新（by id；模拟客户端编辑只发 {id,text}，无 sessionId）-----
-{
-  const { body } = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { id: created.id, text: "updated-text" },
-  });
+  const { body } = await invoke("/tasks");
   assert.equal(body.ok, true);
-  assert.equal(body.job.text, "updated-text");
-  assert.equal(body.job.status, "pending");
-  ok("POST /jobs 更新文本成功（仅 {id,text}）");
+  assert.equal(body.tasks.length, 1);
 }
 
-// ---- POST /jobs 更新（空 text 拒绝）---------------------------------------
+// 4) 更新冲突 → 明确失败
 {
-  const { body } = await invoke("/api/scheduled-send/jobs", {
+  const { body } = await invoke("/tasks/update", {
     method: "POST",
-    json: { id: created.id, text: "   " },
+    json: { id: "s-1", title: "改名" },
   });
   assert.equal(body.ok, false);
-  assert.match(body.error ?? "", /text/);
-  ok("POST /jobs 更新空 text → 拒绝");
+  assert.match(body.error, /拒绝更新/);
 }
 
-// ---- POST /jobs 更新（无 text 无 fireAt → 拒绝）----------------------------
+// 5) 立即执行
 {
-  const { body } = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { id: created.id },
-  });
-  assert.equal(body.ok, false);
-  assert.match(body.error ?? "", /text 或 fireAt/);
-  ok("POST /jobs 更新既无 text 也无 fireAt → 拒绝");
+  const { body } = await invoke("/tasks/run", { method: "POST", json: { id: "s-1" } });
+  assert.equal(body.ok, true);
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].mode, "queue");
 }
 
-// ---- POST /jobs/fire（mock sessionController 记录 mode:queue）-------------
+// 6) 历史
 {
-  const { body } = await invoke("/api/scheduled-send/jobs/fire", {
+  const { body } = await invoke("/tasks/history", {
     method: "POST",
-    json: { id: created.id },
+    json: { id: "s-1", sessionId: "sess-created", limit: 10 },
   });
   assert.equal(body.ok, true);
-  assert.equal(body.job.status, "sent");
-  const call = promptCalls[promptCalls.length - 1];
-  assert.equal(call.mode, "queue");
-  assert.equal(call.sessionId, "sess-e2e");
-  assert.equal(call.content[0].text, "updated-text");
-  ok("POST /jobs/fire 投递（mode:queue，读回更新后的文本）");
+  assert.equal(body.records.length, 1);
 }
 
-// ---- POST /jobs/cancel------------------------------------------------------
-let cancelledId;
+// 7) 删除 + 清理已结束
 {
-  const r = await invoke("/api/scheduled-send/jobs", {
-    method: "POST",
-    json: { sessionId: "sess-e2e", text: "cancel-me", fireAt: Date.now() + 3600_000 },
-  });
-  cancelledId = r.body.job.id;
-  const { body } = await invoke("/api/scheduled-send/jobs/cancel", {
-    method: "POST",
-    json: { id: cancelledId },
-  });
-  assert.equal(body.ok, true);
-  const after = scheduler.get(cancelledId);
-  assert.equal(after.status, "cancelled");
-  ok("POST /jobs/cancel → cancelled");
+  const del = await invoke("/tasks/delete", { method: "POST", json: { id: "s-1" } });
+  assert.equal(del.body.ok, true);
+  const clean = await invoke("/tasks/delete-inactive", { method: "POST", json: {} });
+  assert.equal(clean.body.ok, true);
 }
 
-// ---- POST /jobs/delete------------------------------------------------------
+// 8) 方法错误
 {
-  const { body } = await invoke("/api/scheduled-send/jobs/delete", {
-    method: "POST",
-    json: { id: cancelledId },
-  });
-  assert.equal(body.ok, true);
-  assert.equal(scheduler.get(cancelledId), undefined);
-  ok("POST /jobs/delete 移除");
-}
-
-// ---- 非法 JSON body → 400---------------------------------------------------
-{
-  const handler = handlers.get("/api/scheduled-send/jobs");
-  const req = new EventEmitter();
-  req.method = "POST";
-  let status = 0;
-  const res = { writeHead: (s) => { status = s; }, end: () => {} };
-  const result = handler(req, res);
-  queueMicrotask(() => { req.emit("data", Buffer.from("{not-json")); req.emit("end"); });
-  const timed = await Promise.race([
-    result.then(() => true),
-    new Promise((r) => setTimeout(() => r(false), 2000)),
-  ]);
-  assert.ok(timed, "非法 JSON 也应快速返回");
-  assert.equal(status, 400);
-  ok("非法 JSON body → 400");
-}
-
-// ---- 不支持的方法 → 405-----------------------------------------------------
-{
-  const { status } = await invoke("/api/scheduled-send/jobs", { method: "PATCH" });
+  const { status } = await invoke("/tasks", { method: "PATCH" });
   assert.equal(status, 405);
-  ok("PATCH /jobs → 405");
 }
 
-console.log(`\n✔ routes 单元测试全部通过（${passed} 项）`);
+// 9) 精确路由也必须过宿主鉴权
+{
+  const handlers2 = new Map();
+  const ctx2 = {
+    webServer: { register(spec) { handlers2.set(spec.path, spec.handler); return () => {}; } },
+    schedule,
+    sessionController: ctx.sessionController,
+    sessions: ctx.sessions,
+    get(name) {
+      if (name === "connection") return { requestRejection: () => 401 };
+      return undefined;
+    },
+    on() { return () => {}; },
+  };
+  const bridge2 = new ScheduleBridge(ctx2, stateDir + "-auth", "test");
+  registerRoutes(ctx2, bridge2, "test");
+  const req = new EventEmitter();
+  req.method = "GET";
+  req.headers = {};
+  req.destroy = () => {};
+  const res = { writeHead(s) { this.status = s; }, end(b) { this.body = b ?? ""; } };
+  await handlers2.get("/api/scheduled-send/tasks")(req, res);
+  assert.equal(res.status, 401);
+  bridge2.stop();
+}
+
+bridge.stop();
+console.log("✔ dsh-scheduled-send routes 全部通过");

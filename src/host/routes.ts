@@ -1,46 +1,57 @@
 /**
  * dsh-scheduled-send — Host HTTP 路由（浏览器同源直连，前缀 /api/scheduled-send/）。
  *
- *   GET   health      健康检查（版本 + 任务统计）
- *   GET   jobs        任务列表（pending/sent/missed/cancelled）
- *   POST  jobs        创建/更新任务（有 id = 更新，无 id = 新建）
- *   POST  jobs/cancel 取消一个 pending 任务
- *   POST  jobs/delete 物理删除任意任务
- *   POST  fire        手动立即触发一个 pending 任务（测试/应急用）
+ *   GET  health                 健康检查
+ *   GET  tasks                  官方任务 + 插件元数据
+ *   POST tasks                  新建任务（可自动建立工作区任务会话）
+ *   POST tasks/update           编辑名称/提示词/频率/截止时间
+ *   POST tasks/delete           删除任务
+ *   POST tasks/delete-inactive  清除全部已结束任务
+ *   POST tasks/run              立即投递到官方队列
+ *   POST tasks/history          投递历史
  *
- * 全部 JSON；CORS 放开（与 dsh-personal-workbench 同惯例，dsh web 同源直连）。
+ * 安全：这些是 **exact** 路由，匹配优先于 connection 的 `/api` 前缀路由，
+ * 因此不会自动经过宿主鉴权。每个请求先调用 `connection.requestRejection`：
+ * 公网入口只有带有效 dsh-auth cookie 的浏览器能管理任务；桌面/无 connection
+ * 服务的本地环境才允许直连。
  *
- * ⚠️ 历史教训（v0.4.1 卡死根因）：`readBody` 必须读**请求对象 req**（它才发 data/end
- * 事件），绝不能传响应对象 res——否则 promise 永不 resolve，处理器永不返回，
- * 客户端 fetch 无限挂起（表现为"创建中…"卡死）。v0.5.0 已全部修正。
+ * ⚠️ 历史教训（v0.4.1 卡死根因）：`readBody` 必须读**请求对象 req**，绝不能传 res。
  */
-import type { JobUpsertRequest, JobUpsertResponse, ScheduledJob } from "../shared/types.ts";
-import type { Scheduler, HostCtx } from "./scheduler.ts";
+import type { ScheduleBridge } from "./bridge.ts";
+import type {
+  HealthResponse,
+  TaskCreateRequest,
+  TaskDeleteRequest,
+  TaskHistoryRequest,
+  TaskListResponse,
+  TaskRunRequest,
+  TaskUpdateRequest,
+} from "../shared/types.ts";
 
-/** 请求对象最小面：Node http.IncomingMessage 的流式能力（body 读取）。 */
 type HttpReq = {
   method?: string;
+  headers?: unknown;
   on: (ev: "data" | "end" | "error", fn: (chunk?: unknown, err?: unknown) => void) => void;
   destroy: () => void;
 };
 
 type HttpRes = {
   writeHead: (status: number, headers: Record<string, string>) => void;
-  end: (body: string) => void;
-  on: (ev: "data" | "end" | "error", fn: (chunk?: unknown, err?: unknown) => void) => void;
-  destroy: () => void;
+  end: (body?: string) => void;
+};
+
+type ConnectionLike = {
+  requestRejection?: (request: { headers?: unknown }) => 401 | 403 | undefined;
 };
 
 function sendJson(res: HttpRes, status: number, obj: unknown): void {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-    "Access-Control-Allow-Origin": "*",
   });
   res.end(JSON.stringify(obj));
 }
 
-/** 从**请求对象**读取 body（传错对象会导致永久挂起，见文件头）。 */
 function readBody(req: HttpReq, limit = 1 << 20): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Uint8Array[] = [];
@@ -57,7 +68,6 @@ function readBody(req: HttpReq, limit = 1 << 20): Promise<string> {
   });
 }
 
-/** 解析 JSON body；失败返回 undefined（调用方按缺省处理）。 */
 async function readJsonBody<T>(req: HttpReq): Promise<T | undefined> {
   try {
     return JSON.parse(await readBody(req)) as T;
@@ -66,114 +76,178 @@ async function readJsonBody<T>(req: HttpReq): Promise<T | undefined> {
   }
 }
 
-/** 注册 /api/scheduled-send/* 路由并启动调度器。 */
-export function registerRoutes(ctx: HostCtx, scheduler: Scheduler, version: string): void {
-  const ws = ctx.webServer;
-  if (!ws) return;
+function resolveConnection(ctx: unknown): ConnectionLike | undefined {
+  try {
+    const getter = (ctx as unknown as { get?: (name: string) => unknown }).get;
+    if (typeof getter !== "function") return undefined;
+    return getter.call(ctx, "connection") as ConnectionLike | undefined;
+  } catch {
+    return undefined;
+  }
+}
 
-  const R = (path: string, handler: (req: unknown, res: unknown) => Promise<void>) => {
+/** 先过宿主鉴权；返回 true = 已写拒绝响应，调用方必须停止。 */
+function rejected(ctx: unknown, req: HttpReq, res: HttpRes): boolean {
+  const connection = resolveConnection(ctx);
+  if (connection?.requestRejection === undefined) return false;
+  let rejection: 401 | 403 | undefined;
+  try {
+    rejection = connection.requestRejection({ headers: req.headers });
+  } catch {
+    rejection = 403;
+  }
+  if (rejection === undefined) return false;
+  sendJson(res, rejection, { ok: false, error: rejection === 401 ? "未登录或登录已过期" : "来源被拒绝" });
+  return true;
+}
+
+function methodOf(req: HttpReq): string {
+  return (req.method ?? "GET").toUpperCase();
+}
+
+export function registerRoutes(ctx: unknown, bridge: ScheduleBridge, version: string): void {
+  const webCtx = ctx as unknown as {
+    webServer?: {
+      register: (spec: { kind: "exact"; path: string; handler: (req: HttpReq, res: HttpRes) => Promise<void> | void }) => () => void;
+    };
+  };
+  const ws = webCtx.webServer;
+  if (ws === undefined) return;
+
+  const R = (path: string, handler: (req: HttpReq, res: HttpRes) => Promise<void>) => {
     ws.register({
       kind: "exact",
       path: `/api/scheduled-send${path}`,
-      handler: handler as never,
+      handler: (req, res) => {
+        if (rejected(ctx, req, res)) return;
+        return handler(req, res).catch((e: unknown) => {
+          sendJson(res, 500, { ok: false, error: String((e as Error)?.message ?? e) });
+        });
+      },
     });
   };
 
   R("/health", async (_req, res) => {
-    const hres = res as unknown as HttpRes;
-    const jobs = scheduler.list();
-    const count = (s: string) => jobs.filter(j => j.status === s).length;
-    sendJson(hres, 200, {
-      ok: true,
+    const health = await bridge.health();
+    const body: HealthResponse = {
+      ok: health.scheduleService,
       version,
-      pending: count("pending"),
-      sent: count("sent"),
-      missed: count("missed"),
-      cancelled: count("cancelled"),
-    });
+      scheduleService: health.scheduleService,
+      active: health.active,
+      total: health.total,
+      ...(health.scheduleService ? {} : { error: "宿主未提供 schedule 服务" }),
+    };
+    sendJson(res, health.scheduleService ? 200 : 503, body);
   });
 
-  R("/jobs", async (req, res) => {
-    const hreq = req as unknown as HttpReq;
-    const hres = res as unknown as HttpRes;
-    if (hreq.method === "GET") {
-      sendJson(hres, 200, { ok: true, jobs: scheduler.list(), version });
-      return;
-    }
-    if (hreq.method === "POST") {
-      const body = await readJsonBody<JobUpsertRequest>(hreq);
-      if (body === undefined) {
-        sendJson(hres, 400, { ok: false, error: "body 不是合法 JSON" });
-        return;
-      }
+  R("/tasks", async (req, res) => {
+    if (methodOf(req) === "GET") {
       try {
-        if (body.id) {
-          // 更新：只要求 id + 至少一个可更新字段（客户端编辑只发 {id,text}，不带 sessionId）
-          if (body.text !== undefined && !body.text.trim()) throw new Error("text 不能为空");
-          if (body.text === undefined && !Number.isFinite(body.fireAt)) {
-            throw new Error("更新至少需要 text 或 fireAt 之一");
-          }
-          const up: JobUpsertResponse = { ok: true };
-          up.job = scheduler.update(body.id, {
-            text: body.text,
-            fireAt: body.fireAt,
-            note: body.note,
-            sessionTitle: body.sessionTitle,
-          });
-          sendJson(hres, 200, up);
-        } else {
-          // 新建：完整校验
-          if (!body.sessionId || !body.sessionId.trim()) throw new Error("缺少 sessionId");
-          if (!body.text || !body.text.trim()) throw new Error("text 不能为空");
-          if (!Number.isFinite(body.fireAt)) throw new Error("fireAt 必须是时间戳（毫秒）");
-          const up: JobUpsertResponse = { ok: true };
-          up.job = scheduler.add({
-            sessionId: body.sessionId.trim(),
-            sessionTitle: body.sessionTitle,
-            text: body.text,
-            fireAt: body.fireAt,
-            note: body.note,
-          });
-          sendJson(hres, 200, up);
-        }
+        const tasks = await bridge.list();
+        const health = await bridge.health();
+        const body: TaskListResponse = {
+          ok: true,
+          version,
+          tasks,
+          scheduleService: health.scheduleService,
+        };
+        sendJson(res, 200, body);
       } catch (e) {
-        const up: JobUpsertResponse = { ok: false, error: String((e as Error).message) };
-        sendJson(hres, 200, up);
+        const body: TaskListResponse = {
+          ok: false,
+          version,
+          tasks: [],
+          scheduleService: false,
+          error: String((e as Error)?.message ?? e),
+        };
+        sendJson(res, 200, body);
       }
       return;
     }
-    sendJson(hres, 405, { ok: false, error: "仅支持 GET/POST" });
+    if (methodOf(req) !== "POST") {
+      sendJson(res, 405, { ok: false, error: "仅支持 GET/POST" });
+      return;
+    }
+    const body = await readJsonBody<TaskCreateRequest>(req);
+    if (body === undefined) {
+      sendJson(res, 400, { ok: false, error: "body 不是合法 JSON" });
+      return;
+    }
+    try {
+      const task = await bridge.create(body);
+      sendJson(res, 200, { ok: true, version, task });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
   });
 
-  R("/jobs/cancel", async (req, res) => {
-    const hreq = req as unknown as HttpReq;
-    const hres = res as unknown as HttpRes;
-    const body = await readJsonBody<{ id?: string }>(hreq);
-    const id = (body?.id ?? "").trim();
-    if (!id) { sendJson(hres, 400, { ok: false, error: "缺少 id" }); return; }
-    sendJson(hres, 200, { ok: scheduler.cancel(id) });
+  R("/tasks/update", async (req, res) => {
+    if (methodOf(req) !== "POST") { sendJson(res, 405, { ok: false, error: "仅支持 POST" }); return; }
+    const body = await readJsonBody<TaskUpdateRequest>(req);
+    if (body === undefined || typeof body.id !== "string" || body.id === "") {
+      sendJson(res, 400, { ok: false, error: "缺少任务 id" });
+      return;
+    }
+    try {
+      const task = await bridge.update(body);
+      sendJson(res, 200, { ok: true, version, task });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
   });
 
-  R("/jobs/delete", async (req, res) => {
-    const hreq = req as unknown as HttpReq;
-    const hres = res as unknown as HttpRes;
-    const body = await readJsonBody<{ id?: string }>(hreq);
-    const id = (body?.id ?? "").trim();
-    if (!id) { sendJson(hres, 400, { ok: false, error: "缺少 id" }); return; }
-    sendJson(hres, 200, { ok: scheduler.delete(id) });
+  R("/tasks/delete", async (req, res) => {
+    if (methodOf(req) !== "POST") { sendJson(res, 405, { ok: false, error: "仅支持 POST" }); return; }
+    const body = await readJsonBody<TaskDeleteRequest>(req);
+    if (body === undefined || typeof body.id !== "string" || body.id === "") {
+      sendJson(res, 400, { ok: false, error: "缺少任务 id" });
+      return;
+    }
+    try {
+      await bridge.delete(body.id);
+      sendJson(res, 200, { ok: true, version });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
   });
 
-  R("/jobs/fire", async (req, res) => {
-    const hreq = req as unknown as HttpReq;
-    const hres = res as unknown as HttpRes;
-    const body = await readJsonBody<{ id?: string }>(hreq);
-    const id = (body?.id ?? "").trim();
-    if (!id) { sendJson(hres, 400, { ok: false, error: "缺少 id" }); return; }
-    const job = scheduler.get(id);
-    if (!job) { sendJson(hres, 404, { ok: false, error: "任务不存在" }); return; }
-    if (job.status !== "pending") { sendJson(hres, 200, { ok: false, error: `任务状态 ${job.status}，不可触发` }); return; }
-    await scheduler.fire(id);
-    const after = scheduler.get(id);
-    sendJson(hres, 200, { ok: true, job: after });
+  R("/tasks/delete-inactive", async (req, res) => {
+    if (methodOf(req) !== "POST") { sendJson(res, 405, { ok: false, error: "仅支持 POST" }); return; }
+    try {
+      const deleted = await bridge.deleteInactive();
+      sendJson(res, 200, { ok: true, version, deleted });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
+  });
+
+  R("/tasks/run", async (req, res) => {
+    if (methodOf(req) !== "POST") { sendJson(res, 405, { ok: false, error: "仅支持 POST" }); return; }
+    const body = await readJsonBody<TaskRunRequest>(req);
+    if (body === undefined || typeof body.id !== "string" || body.id === "") {
+      sendJson(res, 400, { ok: false, error: "缺少任务 id" });
+      return;
+    }
+    try {
+      await bridge.runNow(body.id);
+      sendJson(res, 200, { ok: true, version });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
+  });
+
+  R("/tasks/history", async (req, res) => {
+    if (methodOf(req) !== "POST") { sendJson(res, 405, { ok: false, error: "仅支持 POST" }); return; }
+    const body = await readJsonBody<TaskHistoryRequest>(req);
+    if (body === undefined || typeof body.id !== "string" || typeof body.sessionId !== "string") {
+      sendJson(res, 400, { ok: false, error: "缺少 id/sessionId" });
+      return;
+    }
+    try {
+      const page = await bridge.history(body);
+      sendJson(res, 200, { ok: true, version, ...page });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
   });
 }

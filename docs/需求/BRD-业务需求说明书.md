@@ -3,8 +3,9 @@
 ## 当前状态
 
 - 文档性质：规格（现行需求与实现边界的单一事实源）
-- 对应版本：v0.7.4
-- 状态：有效（现行需求 / 边界 / 协作约定有效；逐版本过程流水已压为文末 §5「历史沿革」，版本细节见 `CHANGELOG.md`，事故复盘见 `docs/管理/RMP-风险管理.md`）
+- 对应版本：v0.9.5
+- 状态：有效（现行需求见 §6–§7；§1–§3 为 0.7.x 形态的历史规格原文，仅作过程留痕；
+  版本细节见 `CHANGELOG.md`，事故复盘见 `docs/管理/RMP-风险管理.md`）
 - 维护者：AI + 用户
 
 > 本文件是需求演进的**单一事实源**：每轮用户反馈 → 设计决策 → 实现落点 → 验收方式。
@@ -166,3 +167,80 @@
   跨平台 `pnpm check` 修复（ESM 盘符路径、typeRoots、tsc 启动方式）。
 - **v0.7.4**：页面布局 / 窄容器适配 / 键盘焦点体验优化（范围与验证见 `docs/需求/` + `docs/管理/` 下同 id 文件）；
   本次 docs 终态化（需求流水压为本节，事故细节见 `docs/管理/RMP-风险管理.md`）。
+
+---
+
+## 6. 2026-10-26 复活与重构（v0.8.0 / v0.8.1，现行规格）
+
+### 6.1 原始需求（用户原话要点）
+
+> 我之前的这个插件我归位到正式插件目录了：dsh-scheduled-send/，github 那边应该是 public archived 状态，
+> 我要重新开启它，增加新的功能：现在是定时发到某个会话，我希望我能像 WorkBuddy 这个页面一样实现
+> **提示词定时**功能（名称 / 提示词 / 频率 / 有效期 / 工作区 / 允许完全访问 / 通知），
+> 并能**联动 notify 自动将任务执行状态发送到我控制的微信**或什么里面。
+> 如果能复用官方（自动化任务）的这个插件功能也是好的；官方的这个功能，不需要实际展示在页面，
+> 平时用我上面的这个插件。
+
+**设计共识（开工前确认的默认值）**
+
+| 决策点 | 选择 |
+|---|---|
+| 任务执行场所 | 在选定工作区**创建专用任务会话**（也可绑定已有会话） |
+| 通知范围 | 所有定时任务默认通知（表单留每任务开关） |
+| 「允许完全访问」 | **展示性说明**——实际权限由会话侧审批体系决定，插件不伪造 |
+| 调度引擎 | **复用官方 `ctx.schedule`**（0.2.1-rc 起 durable host 任务，含错过补投） |
+| 官方 UI | profile 禁用条目 `ui-schedule`；host `schedule` 服务保留 |
+| 通知实现 | 归 dsh-notify-alert ≥0.9.0，独立观察会话事件；**插件间不建包依赖** |
+
+### 6.2 设计决策与落点
+
+| 能力 | 实现落点 | 关键取舍 |
+|---|---|---|
+| 定时/持久/重复/投递 | `ctx.schedule.catalog/create/update/delete/deleteInactive/history` | 不自建定时器；旧 `Scheduler`/`jobs.json` 删除 |
+| 频率表单 | `shared/types.ts` `Frequency` 判别联合（once/after/every/daily/weekly/cron） | 人话回显 + 下次执行计算放 host `frequencyOf` |
+| 有效期 `endsAt` | 插件元数据 `<stateDir>/tasks-meta.json`（`MetaStore`） | 官方无 end date → 只在插件侧记；到期分片定时器删官方任务 |
+| 工作区任务会话 | `sessionController.create({workspaceId})` + `rename(任务名)` | 会话名跟随任务名；删除任务不删会话（用户数据保守） |
+| 执行状态 | `session/event`：`user/message(source=schedule)` 解析 framing → 同轮 `turn/end.reason.kind` 归因 | `forked` 不通知；meta 记 `lastExecution` 供列表徽章 |
+| 通知推送 | notify-alert 观察者识别同组事件 → 合并器 → 企微/WxPusher | 两插件只共享**官方事件契约**，无代码耦合 |
+| 官方 UI 隐藏 | `- id: ui-schedule` + `disabled: true`（profile patch） | 验收断言「有定时任务、无自动化任务」 |
+| 路由安全 | 每条 `/api/scheduled-send/*` 先 `connection.requestRejection({headers})` | exact 路由绕过 `/api` 前缀鉴权，不补 = 公网裸奔 |
+
+### 6.3 验收方式（0.8.1 已执行）
+
+- `pnpm check` 五组测试全绿（smoke=ScheduleBridge+mock 官方服务；routes=含 401；hooks=TaskPage 空→有渲染）。
+- 隔离实例（独立 home + 3084）：Playwright 断言侧栏「定时任务」存在、官方「自动化任务」不存在、
+  表单建任成功、console 零报错；证据 `ops/validation/dsh-scheduled-send-0.8.0/screenshots/`。
+- `node scripts/e2e-3082.mjs <base> --token <t> --workspace <id>`：token→cookie 鉴权、
+  health/list/create/update/delete 全通过（探针任务次日 03:07，建后即删，不投递真实消息）。
+- **未实测**：真实模型执行一轮定时任务并经微信收到状态推送（链路各段有单测，端到端待生产安装后人工验收）；
+  Windows 桌面端未验证。
+
+### 6.4 需求流水（本轮）
+
+1. 0.8.0 重构完成后 typecheck 失败：`@deepseek-ai/*` 类型包插件解析不到（TS2307）→
+   确立「本地结构化接口声明宿主面」规则（`ScheduleServiceLike` 等）。
+2. 隔离实例「没有可用工作区」：注册期静态快照为空 → `getWorkspaces()` 活读器（v0.8.1 修复）。
+3. Playwright 误报 `createdOk:false`：断言文本撞车 → 改断「验证任务 + 待执行」共存（测试侧修正，非产品缺陷）。
+
+## 7. 2026-10-26 生产验收后的迭代轮（v0.9.0–v0.9.5，现行规格）
+
+每轮 = 用户反馈 → 决策 → 实现落点；版本细节见 CHANGELOG。
+
+1. **v0.9.0 执行状态静默失效**（用户：手机端没收到推送）。生产会话日志实证
+   `user/message` 的 `content/source` 直接挂在 `data` 下（`assistant/message` 才有 `data.message`），
+   0.8.x 解析形状错误 → `data.message ?? data` 双形状兼容；smoke-test 补真实形状回归用例。
+   同轮补表单三项：**发送到**（新建任务会话/现有会话）、**Agent 模式**（preset 仅新会话可绑，
+   现有会话首轮后锁定只读展示）、**执行模型**（公开 `selectModel`，表单注明会同步全局默认模型；
+   不可用即创建失败）。数据源 `remote.agentPresets.list` / `remote.session.modelCatalog`（超时+降级）。
+2. **v0.9.1 弹窗过高按钮被裁**：modal 内部滚动 + sticky actions，按钮恒可见。
+3. **v0.9.2 品牌标识整块移除**（用户：收缩不算去掉）：`sidebar.brand.name/mark` 注册空实现。
+4. **v0.9.3 收起按钮并入「新会话」行**：该按钮无官方插槽 → 品牌组件挂载 effect 打标记类 +
+   纯 CSS 移位（不搬 DOM 节点，避免宿主重渲染冲突；macOS 顶栏布局自动不命中）。
+5. **v0.9.4 折叠轨道展开标识恢复**（用户：折叠后没有可见标识）：mark 插槽双用途，
+   CSS 按 `railMark` 容器区分显示。
+6. **v0.9.5 两按钮并排不重叠**（用户：重叠难看）：新会话按钮让出右端 40px，收起按钮落进空档。
+
+**生产端到端验收（2026-10-26，3082）**：真实定时任务投递 → 模型执行 → `lastExecution=success`
+→ notify-alert 合并推送 → 用户手机收到「Scheduled Task Finished」，全链路实测通过；
+UI 断言（品牌移除、按钮并排、折叠标识、重开）见 `ops/validation/dsh-scheduled-send-0.8.0/`
+verify-ui / verify-rail 脚本与截图。

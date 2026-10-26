@@ -1,22 +1,34 @@
 /**
  * dsh-scheduled-send — Client 入口（浏览器侧，DSH ModuleLoader 握手）。
  *
- * 两个注册点：
- *   1. `conversation.input.right`（会话作用域）：输入框工具行的「⏰ 定时」标识。
- *      **sessionId 必须由 `inject` 工厂的位置参数取得** —— 框架的 `runInject` 会以
- *      scope key（= sessionId）作为第一个实参调用注册时的 inject 工厂，返回值合并进组件 props
- *      （见 packages/client/ui-renderer/src/client/scoped-slots.tsx 的 `runInject`）。
- *      v0.4.0 曾误把它当作 standard prop 而删掉 inject，导致 sessionId 为空、
- *      创建按钮恒 disabled → 点击静默无反应。v0.4.1 恢复 inject 写法，并在组件内
- *      同时兼容 standard prop 作为兜底。
- *   2. `settings.section`（root 作用域）：设置面板「定时发送」任务管理面板。
+ * 注册点：
+ *   1. `conversation.input.right`：输入框「⏰ 定时」快捷入口（取当前草稿，一次性）；
+ *   2. `conversation.input.dock`：当前会话的待执行任务 dock；
+ *   3. `main` + `sidebar.panellist`：左侧「定时任务」主页（WorkBuddy 式表单/列表）；
+ *   4. `settings.section`：设置内入口（复用同一页面，保持旧入口可用）。
  *
- * 注意（v0.1.0 事故教训）：host 端凡 `ctx.xxx` 取用的服务必须声明
- * `export const inject = [...]`（见 src/index.ts）。
+ * 官方 `ui-schedule` 由 profile patch 禁用；本插件是唯一的调度 UI，
+ * 但调度/持久化/投递仍由宿主 `ctx.schedule` 完成。
  */
-import { makeUI, type MainUI } from "./ui.ts";
+import { makeUI, type MainUI, type WorkspaceRow, type SessionRow, type PresetRow, type ModelOption } from "./ui.ts";
 import { sessionOpenerOf } from "../shared/session-opener.ts";
 import { sessionMetaOf } from "../shared/session-meta.ts";
+
+/** remote 调用统一超时（下拉数据源；失败给明确文案，不静默）。 */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}超时（${ms}ms）`)), ms);
+    p.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
+  });
+}
+
+/** RemoteResult 解包：{ok:true, value} → value；失败抛错。 */
+function unwrapRemote(value: unknown): unknown {
+  const r = value as { ok?: boolean; value?: unknown; error?: unknown } | null | undefined;
+  if (r === null || r === undefined) throw new Error("远端返回为空");
+  if (r.ok === false) throw new Error(String((r.error as { message?: unknown })?.message ?? r.error ?? "远端调用失败"));
+  return "value" in r ? r.value : r;
+}
 
 declare global {
   interface Window {
@@ -32,11 +44,6 @@ window.__ModuleLoader__?.load({
     const React = require("react") as typeof import("react");
     const ui: MainUI = makeUI(React as never, { createPortal: null, portalHost: () => null });
 
-    /**
-     * settings.section 渲染错误边界（v0.7.1）：
-     * 组件渲染抛错时，默认会被 SlotErrorBoundary 吞成空节点 → 用户看到"设置面板空白"且无任何线索。
-     * 这里包一层，让任何渲染异常**可见**并给出定位线索，同时避免空白。
-     */
     type BoundaryProps = { children: unknown };
     type BoundaryState = { error: string | null };
     class SectionErrorBoundary extends React.Component<BoundaryProps, BoundaryState> {
@@ -45,18 +52,16 @@ window.__ModuleLoader__?.load({
         return { error: String((e as Error)?.message ?? e) };
       }
       override componentDidCatch(e: unknown): void {
-        console.error("[scheduled-send] settings.section 渲染失败：", e);
+        console.error("[scheduled-send] 页面渲染失败：", e);
       }
       override render(): React.ReactNode {
         if (this.state.error !== null) {
           return React.createElement(
             "div",
-            { style: { padding: "12px", color: "var(--dsw-alias-state-error-primary)", fontSize: 12, lineHeight: 1.6 } },
-            React.createElement("div", { style: { fontWeight: 600, marginBottom: 4 } },
-              "⚠️ 「定时发送」设置面板渲染失败（v0.7.1 起错误可见化）"),
+            { style: { padding: 12, color: "var(--dsw-alias-state-error-primary)", fontSize: 12, lineHeight: 1.6 } },
+            React.createElement("div", { style: { fontWeight: 600, marginBottom: 4 } }, "⚠️「定时任务」页面渲染失败"),
             React.createElement("div", null, this.state.error),
-            React.createElement("div", { style: { marginTop: 8, opacity: 0.7 } },
-              "请把上方错误信息 + 控制台 [scheduled-send] sessions 服务 诊断发给开发者。"),
+            React.createElement("div", { style: { marginTop: 8, opacity: 0.7 } }, "请把错误信息发给开发者；官方任务数据不受影响。"),
           );
         }
         return this.props.children as React.ReactNode;
@@ -69,6 +74,7 @@ window.__ModuleLoader__?.load({
         spec: {
           name: string;
           id?: string;
+          key?: string;
           order?: number;
           label?: () => string;
           inject?: (...args: never[]) => Record<string, unknown>;
@@ -79,13 +85,136 @@ window.__ModuleLoader__?.load({
 
     return {
       name: "scheduled-send",
-      inject: ["slots", "timer", "sessions"],
+      inject: ["slots", "timer", "sessions", "workspaces", "remote.agentPresets", "remote.session"],
       apply(ctx: { get: (k: string) => unknown }) {
         const slots = ctx.get("slots") as Slots | undefined;
         if (!slots) return;
 
-        // 主入口：输入框工具行「⏰ 定时」。
-        // sessionId 由框架按声明注入 inject 工厂（位置参数），返回值成为组件 props。
+        const sessionsSvc = ctx.get("sessions") as
+          | { open?: (id: string) => void; list?: { getSnapshot: () => unknown } }
+          | undefined;
+        const opener = sessionOpenerOf(sessionsSvc);
+        const sessionMeta = (() => {
+          try {
+            const snap = sessionsSvc?.list?.getSnapshot?.() as
+              | { byId?: Record<string, { displayTitle?: string; title?: string; cwd?: string }> }
+              | undefined;
+            return sessionMetaOf(snap);
+          } catch {
+            return {};
+          }
+        })();
+        const readWorkspaces = (): WorkspaceRow[] => {
+          try {
+            const svc = ctx.get("workspaces") as
+              | { list?: { getSnapshot: () => { items?: WorkspaceRow[] } } }
+              | undefined;
+            const snap = svc?.list?.getSnapshot?.();
+            return Array.isArray(snap?.items)
+              ? snap.items.map(item => ({ workspaceId: String(item.workspaceId), title: String(item.title), path: String(item.path) }))
+              : [];
+          } catch {
+            return [];
+          }
+        };
+        const readSessions = (): SessionRow[] => {
+          try {
+            const snap = sessionsSvc?.list?.getSnapshot?.() as
+              | { byId?: Record<string, {
+                  id?: string;
+                  displayTitle?: string;
+                  title?: string;
+                  workspaceId?: string;
+                  projectionValues?: { agentPreset?: unknown };
+                }> }
+              | undefined;
+            const rows: SessionRow[] = [];
+            for (const [id, entry] of Object.entries(snap?.byId ?? {})) {
+              const presetRaw = entry?.projectionValues?.agentPreset as { id?: string; name?: string } | string | undefined;
+              const preset = typeof presetRaw === "string"
+                ? presetRaw
+                : presetRaw?.name ?? presetRaw?.id;
+              rows.push({
+                sessionId: id,
+                title: String(entry?.displayTitle ?? entry?.title ?? ""),
+                ...(typeof entry?.workspaceId === "string" ? { workspaceId: entry.workspaceId } : {}),
+                ...(typeof preset === "string" && preset !== "" ? { agentPreset: preset } : {}),
+              });
+            }
+            return rows;
+          } catch {
+            return [];
+          }
+        };
+        const fetchPresets = async (): Promise<PresetRow[]> => {
+          const remote = ctx.get("remote.agentPresets") as { list?: () => Promise<unknown> } | undefined;
+          if (remote?.list === undefined) throw new Error("宿主未提供 agentPresets 远端");
+          const value = unwrapRemote(await withTimeout(remote.list(), 8000, "加载模式清单")) as
+            { presets?: Array<{ id?: unknown; name?: unknown }> };
+          return (value?.presets ?? [])
+            .filter(x => typeof x.id === "string" && x.id !== "")
+            .map(x => ({ id: String(x.id), name: String(x.name ?? x.id) }));
+        };
+        const fetchModels = async (): Promise<ModelOption[]> => {
+          const remote = ctx.get("remote.session") as { modelCatalog?: () => Promise<unknown> } | undefined;
+          if (remote?.modelCatalog === undefined) throw new Error("宿主未提供 session.modelCatalog 远端");
+          const catalog = unwrapRemote(await withTimeout(remote.modelCatalog(), 10000, "加载模型清单")) as
+            { groups?: Array<{ id?: unknown; name?: unknown; models?: Array<{ id?: unknown; name?: unknown }> }> };
+          const out: ModelOption[] = [];
+          for (const g of catalog?.groups ?? []) {
+            for (const m of g?.models ?? []) {
+              if (typeof g.id !== "string" || typeof m.id !== "string") continue;
+              out.push({
+                provider: g.id,
+                model: m.id,
+                providerName: String(g.name ?? g.id),
+                modelName: String(m.name ?? m.id),
+              });
+            }
+          }
+          return out;
+        };
+        const injected = {
+          ...(opener === undefined ? {} : { openSession: opener }),
+          sessionMeta,
+          getWorkspaces: readWorkspaces,
+          getSessions: readSessions,
+          fetchPresets,
+          fetchModels,
+        };
+
+        // 左侧主导航：与官方「自动化任务」同位置；官方 ui-schedule 在 profile 层禁用。
+        slots.inject("main", () =>
+          slots.register(
+            { name: "main", key: "scheduled-send", inject: () => injected },
+            (props: Record<string, unknown>) => React.createElement(
+              SectionErrorBoundary as never,
+              null,
+              React.createElement(ui.TaskPage as never, { ...props, ...injected } as never),
+            ),
+          ));
+        slots.inject("sidebar.panellist", () =>
+          slots.register(
+            { name: "sidebar.panellist", id: "scheduled-send", order: 10, label: () => "定时任务" },
+            ui.PanelIcon,
+          ));
+
+        // 移除官方品牌区（logo + 两行「本地构建/版本徽标」→ 空实现，整块不再占空间），
+        // 并把「收起侧栏」按钮移位到「新会话」行右端（BrandShift 的挂载 effect 打标记类）。
+        // single 插槽同优先级重复注册会抛错：桌面版若装了 ui-brand-official，让位并保持静默降级。
+        const hideBrand = (slotName: string, component: () => unknown) => {
+          slots.inject(slotName, () => {
+            try {
+              slots.register({ name: slotName }, component);
+            } catch (e) {
+              console.info(`[scheduled-send] ${slotName} 已有占位者，跳过隐藏：`, String((e as Error)?.message ?? e));
+            }
+          });
+        };
+        hideBrand("sidebar.brand.name", ui.BrandShift);
+        hideBrand("sidebar.brand.mark", ui.BrandHidden);
+
+        // 输入框工具行「⏰ 定时」：快速把当前草稿排成一次性任务。
         slots.inject("conversation.input.right", () =>
           slots.register(
             {
@@ -97,7 +226,7 @@ window.__ModuleLoader__?.load({
             ui.InputBadge,
           ));
 
-        // 对话输入区定时排队 dock（与原生 QueueDock 同插槽；order 30 在其后）
+        // 当前会话待执行任务 dock。
         slots.inject("conversation.input.dock", () =>
           slots.register(
             {
@@ -109,56 +238,15 @@ window.__ModuleLoader__?.load({
             ui.ScheduledDock,
           ));
 
-        // 管理入口：设置面板左侧导航「定时发送」（order 11，Vision Router「识图」在 12）。
-        // 需要客户端 `sessions` 服务的 open(id) 来实现"点击跳到对应会话"。
-        // ⚠️ v0.7.0：settings.section 是唯一"包装函数里【直接调用组件函数】"的注册——React 规定
-        // 组件必须经 createElement 渲染（hooks 才归属该组件）；直接 `(ui.SettingsSection)(props)`
-        // 会让其内部 useState/useEffect/useSessions 挂到外层包装组件 → 渲染异常 → 设置面板空白。
-        // 必须改成 `React.createElement(ui.SettingsSection, props)`（ScheduledDock/InputBadge 传组件
-        // 引用由框架 createElement，天然正确；settings 需包一层注 openSession，因此这里显式 createElement）。
+        // 设置内入口：复用同一页面，保持旧路径可用。
         slots.inject("settings.section", () =>
           slots.register(
-            { name: "settings.section", id: "scheduled-send", order: 11, label: () => "定时发送" },
-            (props: Record<string, unknown>) => {
-              // 会话服务：open=跳转；list.getSnapshot()=同步元数据快照（标题/cwd）。
-              // 全部经 ctx.get('sessions')（inject 已声明 'sessions'，v0.6.1 修复点）。
-              const svc = ctx.get?.("sessions") as
-                | { open?: (id: string) => void; list?: { getSnapshot: () => unknown } }
-                | undefined;
-              const opener = sessionOpenerOf(svc);
-              // ⚠️ 元数据不得用「条件 hook」：SettingsSection 内不得 `typeof p.useSessions==='function'
-              // ? useSessions(...) : ...`（React hooks 稳定性：跨渲染数量漂移 → "Rendered more hooks"
-              // → 被 SlotErrorBoundary 吞成空白）。这里用**同步快照**算好普通对象传入（无 hook）。
-              const sessionMeta = (() => {
-                try {
-                  const snap = svc?.list?.getSnapshot?.() as
-                    | { byId?: Record<string, { displayTitle?: string; title?: string; cwd?: string }> }
-                    | undefined;
-                  return sessionMetaOf(snap);
-                } catch { return {} as Record<string, { title?: string; cwd?: string }>; }
-              })();
-              // 跳转能力诊断：sessions 服务未注入/open 缺失时，设置面板要给出可见提示（禁止静默）
-              try {
-                console.info("[scheduled-send] sessions 服务", {
-                  hasService: !!svc,
-                  hasOpen: typeof svc?.open === "function",
-                  openerReady: typeof opener === "function",
-                  metaCount: Object.keys(sessionMeta).length,
-                });
-              } catch { /* 诊断失败不影响功能 */ }
-              // ✅ 组件化渲染（不得改回直接函数调用）+ 错误边界（渲染异常可见，不再空白）
-              return React.createElement(SectionErrorBoundary as never, null,
-                React.createElement(ui.SettingsSection as never, {
-                  ...props,
-                  // ⚠️ 不能用 `const f = svc.open` 再调用：sessions.open 方法体依赖 this.manager
-                  //（service.ts `open(){ this.manager.select(id) }`），拆出后再调 this 变 undefined → 报
-                  // "Cannot read properties of undefined (reading 'manager')"。必须经箭头函数保引用调用。
-                  openSession: opener,
-                  // 供设置面板展示"跳转能力不可用"的原因（0.6.1 起）
-                  sessionsUnavailable: !svc || typeof svc?.open !== "function",
-                  sessionMeta,
-                } as never));
-            },
+            { name: "settings.section", id: "scheduled-send", order: 11, label: () => "定时任务" },
+            (props: Record<string, unknown>) => React.createElement(
+              SectionErrorBoundary as never,
+              null,
+              React.createElement(ui.SettingsSection as never, { ...props, ...injected } as never),
+            ),
           ));
       },
     };

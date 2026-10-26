@@ -1,7 +1,7 @@
 {
   "name": "dsh-scheduled-send",
-  "version": "0.7.4",
-  "description": "DSH 定时发送：给排队消息/预写内容设定发送时间（如 18:30），到点由 dsh host 自动投递进会话排队队列（mode:queue），agent 运行中自动消费。定时器跑在 dsh 常驻 host 进程里，离开电脑仍会触发。",
+  "version": "0.9.5",
+  "description": "DSH 定时任务：复用官方 Schedule 服务，提供 WorkBuddy 式提示词定时表单、任务会话、截止时间与执行状态；通知联动 dsh-notify-alert。",
   "keywords": [
     "dsh",
     "dsh-plugin",

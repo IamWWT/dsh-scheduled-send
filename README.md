@@ -1,118 +1,161 @@
 # dsh-scheduled-send
 
-> ## ⚠️ 已归档（Archived，2026-10-18）
->
-> **归档原因**：已经可以使用 **dsh 自动化任务**做更灵活的定时了；如果确实需要「相对固定的会话发送」，仍可使用本插件。
->
-> **状态**：本仓为只读归档，不再维护。源码于 2026-10-18 从 `dsh-plugins` 工作区移出、独立成仓，
-> 保留完整提交历史，定格在 **0.7.4**。`docs/` 中原本指向 dsh-plugins 工作区的跨仓相对链接保持原样，
-> 可能已失效。已装入 profile 的 0.7.4 不受影响，仍可继续使用。
+DSH 定时任务插件：给**提示词**设定发送计划（单次 / 每天 / 每周 / 固定间隔 / Cron），
+到点由宿主**官方 Schedule 服务**投递进目标会话（常驻 host 进程，页面关闭仍触发）。
+本插件不重写调度，只补官方没有的四件事——**管理表单、有效期、执行状态观察、通知联动**，
+并让「定时任务」页取代官方「自动化任务」入口。
 
-## 一句话定位
+现行版本 **0.9.5**；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-DSH 插件：给**排队消息 / 预写内容**设定发送时间（如 18:30），到点由 dsh 常驻 host 进程自动投递进会话排队队列（`mode: queue`，与原生 QueueDock 同通道）——是 dsh 原生排队机制的**薄封装**，只补「定时触发」与「任务管理」两层能力。
+## 效果预览
 
-## 当前能力清单
+侧栏「定时任务」入口（品牌区已移除，收起按钮并入「新会话」行）：
 
-**入口与创建**
+![侧栏入口](docs/images/sidebar.png)
 
-- 聊天输入框工具行「⏰ 定时」（`conversation.input.right`，与模型标识同行）：点开浮层选 `时 : 分 : 秒` + 今天/明天 → 把**输入框当前草稿**排期，目标会话自动注入，无需填 session id。
-- 浮层内不设文本输入框，内容直接取 DSH 输入框当前草稿（`useInput`）；创建后可自动清空输入框（`inputActions.setDraft`），避免误按回车双发。
-- **时间规则**：今天只可定当前时刻之后（已过即报错提示改选明天），明天可定 0–24 点；host 端 `Scheduler.maxFireAt()` 封顶，界面实时显示绝对时刻与剩余时间。
+任务管理页（统计、待执行/已结束分组、行内操作）：
 
-**投递与持久化**
+![任务列表](docs/images/task-list.png)
 
-- 到点调用 `sessionController.prompt({ mode: "queue" })` 投进会话持久队列（Inbox `next-turn`）；定时器跑在 dsh 常驻 host 进程——web 关闭 / 离开电脑 / 浏览器关闭后仍会触发；dsh 重启后 pending 任务自动补投。
-- 任务表落 `<stateDir>/jobs.json`（默认 `$DSH_HOME/profiles/web/scheduled-send/jobs.json`），重启不丢；字段向后兼容，版本升级不迁移。
-- **每会话最多 3 个待触发任务**（host `Scheduler.add` 强校验 + client 创建前预检），设置面板有规则说明标签。
-- 所有请求带 10 秒超时（AbortController）+ 明确失败文案，绝不无限「创建中…」。
+WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / 执行模型 / 通知）：
 
-**任务管理**
+![创建表单](docs/images/create-dialog.png)
 
-- 设置 → 左侧「定时发送」（`settings.section`，order 11）：按**待触发 / 已发送 / 失败 / 已撤回**分组，完成态默认折叠，点分组标题展开。
-- 每行操作：**放大查看**（弹层看完整内容）/ **打开会话**（`sessions.open(id)` 跳到该会话对话）/ **编辑内容** / **撤回** / **立即发** / **删除**。
-- 每行展示完整 sessionId + 会话标题（displayTitle）+ 工作目录 cwd（数据源 = dsh `sessions` 服务的 list 投影；`src/client/entry.ts` 在注册层用 `list.getSnapshot()` 取同步快照传入，组件内不调 hook）；`sessions` 未注入时面板给明确警告而非静默。
-- **对话区定时排队**：当前会话有 pending 任务时，输入框上方像原生 QueueDock 一样展示「⏰ 定时排队」，每行含 `HH:MM:SS 发送` + 剩余时间 + 内容预览 + 撤回。
-- 配色全走 DSH 主题 token（`--dsw-alias-*` / `--dsw-elevation-panel`），随全局明暗切换。
+## 功能
 
-**边界（明确不做）**
+**入口与管理**
 
-- 不处理图片 / 附件（纯文本：`Scheduler.fire()` 只投 `content: [{ type: "text", text }]`）；不做跨设备 / 多 profile 同步（MVP 只覆盖当前 web profile）；不修改 dsh 排队 / Inbox 机制本身。
-- 配置只声明代码实际消费的键：`stateDir`（声明处 = `cordis.patch.yml` 的 bundle insert config，内置缺省 `""` = `$DSH_HOME/profiles/<profile>/scheduled-send`）。
-  **旧口径"写在 `$DSH_HOME/settings.yaml`"已失效**（2026-10-13 更正）：该文件已不再被加载——框架迁移时把它改名为 `settings.yaml.imported`（见 `dsh-plugins/docs/管理/CMP-插件开发规范.md` §2.7.1）；本插件未注册设置面板配置卡片，覆盖 `stateDir` 要走 profile 侧配置，编辑 `settings.yaml` 无效。
+- 侧栏「定时任务」独立页：待执行/已结束分组、统计徽章（下次执行、host 与官方 Schedule 状态）、
+  一键清理已结束任务（`deleteInactive`）。
+- 创建/编辑弹窗字段：任务名称、提示词、频率（单次/每天/每周/固定间隔/Cron，时区默认本地）、
+  有效期（长期有效 / 截止时刻）、**发送到**（新建任务会话 ⟂ 现有会话）、**Agent 模式**（preset，
+  仅新会话可选——现有会话首轮后锁定，只读展示）、**执行模型**、执行完成推送开关。
+- 聊天输入框工具行「⏰ 定时」：把当前草稿一键排成一次性任务；输入框上方 dock 展示本会话待执行任务。
+- 每行操作：编辑 / 立即执行（官方 `runNow` 投递）/ 打开会话 / 删除；展示最近执行结果与投递回执。
+
+**调度与投递（全部复用官方）**
+
+- 任务真身 = 官方 `ctx.schedule.create`（`at/after/every/daily/weekly/cron`），持久化在官方
+  `storages/schedule.json`：重启自动恢复、错过自动补投，投递走原生 `user/message`
+  （`source.kind='schedule'` framing）——插件不自建定时器、不重写队列语义。
+- 新会话路径：`sessionController.create`（preset 在创建请求一步绑定 `agentPreset`）+ `rename`
+  自动建任务会话；模型经公开方法 `sessionController.selectModel` 在保存时应用
+  （与手动切换同链路，**会同步更新全局默认模型**，表单已注明；模型不可用即创建失败，不建半坏任务）。
+- 有效期：`endsAt` 存插件 meta，到期（分片定时器）自动删除官方任务。
+- 插件元数据 `<stateDir>/tasks-meta.json`（默认 `$DSH_HOME/profiles/<profile>/scheduled-send`）与
+  官方任务表**对账式**合并：官方行为主，meta 缺失走默认，官方已删的行由 `reconcile` 清掉。
+
+**执行状态与通知**
+
+- 监听 `session/event`：`user/message(source=schedule)` 解析任务 id → 同轮 `assistant/message`
+  留存摘要 → `turn/end` 按 `reason.kind` 归为 `success/failed/aborted/blocked/max-tokens/interrupted`，
+  写回 meta 并刷新列表。
+- 通知不落本插件：dsh-notify-alert ≥0.9.0 独立观察同一组官方事件，识别定时轮次后推送
+  微信（企微 webhook / WxPusher）。两端只靠**官方事件契约**解耦，不建包依赖。
+  全链路（定时投递→模型执行→手机收到推送）已在生产实测通过。
+
+**侧栏品牌区处理**
+
+- 经公开插槽 `sidebar.brand.name` / `sidebar.brand.mark` 注册替换实现：移除「DSH · 本地构建」标识；
+  折叠轨道的展开按钮保留可见图标。
+- 「收起侧栏」按钮无官方插槽，采用挂载标记类 + 纯 CSS 并入「新会话」行右端（不搬 DOM 节点，
+  折叠/展开由官方逻辑原样驱动）；桌面版装了 ui-brand-official 时自动让位。
+
+**安全边界**
+
+- 路由 `/api/scheduled-send/*` exact 注册**绕过** `/api` 前缀鉴权，每条路由显式过
+  `connection.requestRejection({headers})`：未登录 401、来源不信任 403；凭据 = 原生 `dsh-auth-*` cookie。
+- 不修改上游；只消费公开扩展点（`ctx.schedule`、`sessionController`、`webServer.register`、
+  `session/event`、`schedule/changed`、插槽）。
+- 明确不做：图片/附件投递、跨设备同步、插件间包依赖；更细的多渠道路由归 notify-alert 设置。
+
+## 隐藏官方「自动化任务」UI
+
+官方调度服务保留、客户端 UI 禁用——profile patch（Ubuntu = `~/.dsh-dev/profiles/web/cordis.patch.yml`）：
+
+```yaml
+- id: ui-schedule
+  disabled: true
+```
+
+只禁 `ui-schedule` 这一个 client 条目；host `schedule` 服务不受影响，官方任务照跑。
 
 ## 安装
 
-一律 **tgz 安装**，不使用 link：
+一律 **tgz 安装**（不用 link）；与 dsh-notify-alert ≥0.9.0 同装才有执行状态推送：
 
 ```bash
-cd dsh-plugins/dsh-scheduled-send
-pnpm check && npm pack        # 门禁构建 + 冒烟 + 打包 → dsh-scheduled-send-0.7.4.tgz
+pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.9.5.tgz
 
-cd ../../deepseek-harness
-DSH_HOME=~/.dsh-dev pnpm dsh plugin --profile web add \
-  /home/wwt/Downloads/aigc/proj/deepseek/dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.7.4.tgz
+# Ubuntu 源码版（CLI 不在 PATH；脚本默认 DSH_HOME=~/.dsh-dev、profile=web）
+DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
+  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.9.5.tgz --apply
+
+# Windows 桌面版
+"<安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add <tgz 绝对路径>
 ```
 
-- 装完核对 `~/.dsh-dev/profiles/web/node_modules/dsh-scheduled-send/lib` 真实存在；`pnpm verify:installed` 做同一检查。
-- **重打包必须升版本号**（四处同步，见 [AGENTS.md](AGENTS.md)）：pnpm 对 `file:` tgz 按 lockfile integrity 判「已最新」并缓存解压产物，同版本重打包会残留缺 `lib/` 的旧布局（症状：启动即 `Cannot find module '.../lib/index.js'`）。对策：升版本号，或先 `plugin rm dsh-scheduled-send` 再 `add`，装完必跑 `pnpm verify:installed`。
-- 重启 3082 **需用户同意**：`systemctl --user restart dsh-dev-web`；windows-lite 托盘退出后重开桌面应用。
-  （端口拓扑：3082 是 `dsh-web-relay` 的纯 TCP 转发口，dsh 本体在 `127.0.0.1:3083`（`dsh-dev-web`）——
-  重载插件只需重启 `dsh-dev-web`，relay 不必重启。）
-- `pnpm install:dev`（= `bash scripts/install-to-dsh.sh`）当前仍是**源码目录 link 安装**流程（构建门禁→冒烟→rm 旧→link→安装后验证，不自动重启），与 tgz 纪律不一致；脚本改造前请按上方 tgz 命令安装。
+- 装完核对 `profiles/web/node_modules/dsh-scheduled-send/lib` 真实存在（`pnpm verify:installed`）。
+- **重打包必须升版本号**（五处同步，见 [AGENTS.md](AGENTS.md)）；同版本重打包会被 pnpm 按
+  integrity 判「已最新」，残留旧解压产物 → 启动即 `ERR_MODULE_NOT_FOUND`。
+- 重启生效 **需用户同意**：Ubuntu `systemctl --user restart dsh-dev-web`；
+  Windows 托盘退出后重开桌面应用。
 
 ## 构建与验证
-
-`package.json` scripts：`build` / `build:full` / `check` / `typecheck` / `test` / `pack` / `verify:installed` / `install:dev` / `e2e`，以及按层拆分的 `test:smoke` / `test:routes` / `test:opener` / `test:meta` / `test:hooks`。
 
 ```bash
 pnpm check              # 门禁构建 + host/client typecheck + 五组测试（smoke/routes/opener/meta/hooks）
 pnpm typecheck          # tsc --noEmit（host + client）
 pnpm verify:installed   # 安装后验证（缺 lib/ / 扁平残留就地拦截）
-pnpm e2e                # = node scripts/e2e-3082.mjs：3082 在线 API 端到端（重启后跑，幂等，不碰真实会话）
+pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --token <启动token>
+                        # 探针任务「次日 03:07 单次」→ list/update/delete，不投递真实消息
 ```
 
-**三道「防坏安装」门禁**（构建期自动执行）：
-
-| # | 门禁 | 何时触发 | 说明 |
-|---|---|---|---|
-| 1 | 顶层布局卫生 | `pnpm build` | 源码目录出现顶层 `index.ts`/`client.js`/`build.mjs`/`client/`/`host/` 或 `node_modules` 软链 → 构建直接失败（会污染装进 profile 的目录布局） |
-| 2 | 产物可加载 | `pnpm build` | `lib/` 双产物存在且非空；host 动态 import 断言导出 `Scheduler/VERSION/apply/inject/name` 且 `inject` 含 `webServer`；client 检查 `__ModuleLoader__` / 插件 id / 关键插槽 |
-| 3 | 安装后验证 | `pnpm verify:installed` | 对真实安装目录检查 `package.json.main` 指向的文件存在可加载、无扁平残留 |
-
-- 类型检查跨平台：`scripts/paths.mjs` 依次探测 `env → 同级 deepseek-harness → <DSH_HOME>/profiles/node_modules → <DSH_HOME>/profiles/<profile>/node_modules` 收集 `@types`（并补探 pnpm 虚拟 store），由 `scripts/build.mjs` 以 `--typeRoots` 注入 tsc，经 `process.execPath` 启动。**干净克隆即可 `pnpm check`**，无需先 `pnpm install`（本插件按布局红线不往版本库放 `node_modules`）。
-- 升级 dsh 或新增同 profile 插件后：`pnpm check` + `pnpm verify:installed` + `node scripts/e2e-3082.mjs`，再按 [docs/测试/FTR-测试指南.md](docs/测试/FTR-测试指南.md) 手工清单验收。
+- **三道防坏安装门禁**（构建期自动执行）：顶层布局卫生 / 产物可加载（host 导出断言 +
+  client `__ModuleLoader__`、插件 id、插槽断言：`main key=scheduled-send`、`sidebar.panellist`、
+  `conversation.input.right|dock`、`settings.section`、`sidebar.brand.name|mark`）/ 安装后验证。
+- 不 import `@deepseek-ai/*` 类型包（构建解析不到）：宿主面用本地结构化接口声明
+  （`bridge.ts` 的 `ScheduleServiceLike` 等）。
+- 隔离实测：独立 home + 3084 端口实例，Playwright 断言（品牌移除、收起按钮并入新会话行且
+  不重叠、折叠轨道展开标识可见、建表单条任务、console 零报错），脚本与截图在管理根
+  `ops/validation/dsh-scheduled-send-0.8.0/`。
 
 ## 环境支持矩阵
 
 | 环境 | 支持度 | 验证状态 |
 |---|---|---|
-| `ubuntu-4090`（源码构建 + systemd 3082） | 全量 | **host 侧 0.7.4 已加载并响应**（2026-10-13 实测 `/api/scheduled-send/health` → `{"ok":true,"version":"0.7.4",…}`）；入口 / dock / 设置面板与到点投递的**人工验收未记录 → 未验证** |
-| `windows-lite`（官方桌面版 profile `desktop`，无 systemd） | 全量 | **未在 Windows 实测**（本机无法验证）。差异仅在**进程管理**——无 systemd，定时器跑在 dsh host 进程内，「离开电脑仍触发」的前提是 dsh 进程保持运行；**未验证** |
+| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | **0.9.5 生产实装**（2026-10-26）：API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路通过 |
+| `windows-lite`（官方桌面版 profile `desktop`） | 全量 | **未在 Windows 实测**。调度跑在桌面 host 进程内，「离开电脑仍触发」前提是 dsh 进程保持运行；装完须**托盘退出后重开**才生效 |
 
-- 数据层：不依赖 MySQL/SQLite，状态落 `<stateDir>/jobs.json`（DSH_HOME 内），两环境行为一致；无 Python / 本地模型依赖。
-- 兼容基线：Node `^22.19.0 || >=24.0.0`（与 deepseek-harness `engines` 一致）；host 产物 target es2022；浏览器需支持 ES2022 / `fetch` / `AbortController`；要求当前 deepseek-harness 基线（依赖 `sessionController.prompt({mode:'queue'})`、插槽 `conversation.input.right` / `conversation.input.dock` / `settings.section`、客户端服务 `sessions.open(id)`、host 服务 `webServer`）。
+- 数据层：官方 `storages/schedule.json`（任务真身）+ `<stateDir>/tasks-meta.json`（插件元数据），
+  不依赖 MySQL/SQLite；无 Python / 本地模型依赖。
+- 兼容基线：Node `^22.19.0 || >=24.0.0`；host 产物 target es2022；
+  要求 deepseek-harness ≥ 0.2.1-rc.x 且官方 `schedule` 服务可用
+  （依赖 `ctx.schedule.catalog/create/update/delete/deleteInactive`、
+  `sessionController.create/rename/prompt/selectModel`、`session/event` 的 schedule framing、
+  插槽 `sidebar.panellist` / `main(key)` / `conversation.input.right|dock` / `settings.section` /
+  `sidebar.brand.name|mark`）。
 
 ## 文档索引
 
 | 文件 | 一句话 |
 |---|---|
+| [docs/images/](docs/images/) | 效果截图（README 用，隔离实例生成） |
 | [docs/README.md](docs/README.md) | 文档体系总览与阅读路径 |
 | [docs/FILE_INDEX.md](docs/FILE_INDEX.md) | 全插件文档索引（每份一行） |
 | [docs/glossary.md](docs/glossary.md) | 本插件术语表 |
 | [docs/需求/BRD-业务需求说明书.md](docs/需求/BRD-业务需求说明书.md) | 需求记录（每轮反馈 → 设计决策 → 实现落点） |
-| [docs/需求/BRD-001-complete-feature.md](docs/需求/BRD-001-complete-feature.md) + [docs/管理/PP-001-complete-feature-计划.md](docs/管理/PP-001-complete-feature-计划.md) / [任务](docs/管理/PP-001-complete-feature-任务.md) | 首发完整功能规格（SDD 三件套，历史记录） |
-| [docs/需求/BRD-20260925-experience.md](docs/需求/BRD-20260925-experience.md) + [docs/管理/PP-20260925-experience-计划.md](docs/管理/PP-20260925-experience-计划.md) / [任务](docs/管理/PP-20260925-experience-任务.md) | 布局 / 窄容器适配与键盘焦点优化规格（历史记录） |
-| [docs/测试/FTR-测试指南.md](docs/测试/FTR-测试指南.md) | 测试文档：单元 / 产物门禁 / 端到端 / 手工验收清单 |
+| [docs/需求/BRD-001-complete-feature.md](docs/需求/BRD-001-complete-feature.md) 等 SDD 三件套 | 首发/体验期历史记录（0.7.x 形态，非现行规格） |
+| [docs/测试/FTR-测试指南.md](docs/测试/FTR-测试指南.md) | 测试文档：单元 / 产物门禁 / e2e / 手工验收清单 |
 | [docs/管理/RMP-风险管理.md](docs/管理/RMP-风险管理.md) | 事故与排障记录 |
-| [docs/history/归档-20261013.md](docs/history/归档-20261013.md) | 历史归档（被删除的过期叙述原文，非现行手册） |
-| [AGENTS.md](AGENTS.md) | 本插件专属硬规则（插槽、inject、创建流程三保险、门禁） |
+| [docs/history/归档-20261013.md](docs/history/归档-20261013.md) | 历史归档（过期叙述原文，非现行手册） |
+| [AGENTS.md](AGENTS.md) | 本插件专属硬规则（inject、鉴权、门禁、版本同步） |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
-
-## 版本号
-
-**0.7.4**（`package.json.version` = `src/index.ts` 的 `VERSION` = tgz 文件名 `dsh-scheduled-send-0.7.4.tgz`）
 
 ## 附：仓库与共用目录
 
-唯一代码仓库 = `IamWWT/dsh-plugins`（private monorepo），本插件目录 `dsh-plugins/dsh-scheduled-send/`；分支 `main`（集成）/ `ubuntu`（agent 开发）/ `windows`（用户）。遵循 [DeepSeek 共用目录约定](../../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)，管理根统一写作 `<DEEPSEEK_ROOT>`（`.../deepseek/`）；Bash/systemd 命令只适用于 `ubuntu-4090`。
+代码真源 = **独立仓 `IamWWT/dsh-scheduled-send`（public，活跃）**；当前 checkout 物理位于
+monorepo 目录 `dsh-plugins/dsh-scheduled-send/` 下，但**仍是独立 git 仓库**（不作为
+`dsh-plugins`/管理根的 gitlink，不进 monorepo 的版本同步范围）。
+遵循 [DeepSeek 共用目录约定](../../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)，管理根统一写作 `<DEEPSEEK_ROOT>`；
+Bash/systemd 命令只适用于 `ubuntu-4090`。

@@ -267,6 +267,47 @@ properties of undefined (reading 'manager')"。
 
 ---
 
+## 2026-10-26（v0.8.0/v0.8.1）复活重构批
+
+### 事故 0801：typecheck 报 TS2307，插件 import 上游类型包
+
+**症状**：0.8.0 初版 `bridge.ts`/`routes.ts` 直接 `import type` 官方 `@deepseek-ai/dsh-schedule`
+类型，`pnpm check` 恒报 `Cannot find module`。
+
+**根因**：插件构建只解析本地与 profile 依赖（`scripts/paths.mjs` 的 @types 探测不含上游包类型导出）。
+
+**修复**：删除全部 `@deepseek-ai/*` 值/类型 import，宿主面以本地结构化接口声明
+（`ScheduleServiceLike` 等）。**规则**：插件不依赖上游类型包，契约变化先核对官方源码再改本地声明。
+
+### 事故 0802：任务弹窗「没有可用工作区」（隔离实例 Playwright）
+
+**症状**：UI 验证时工作区下拉恒空，创建被阻；但侧栏/页面/列表全部正常。
+
+**根因**：`entry.ts` 在**插槽注册时**一次性 `workspaces.list.getSnapshot()` 取静态快照传入，
+注册发生在启动早期，快照尚空——与 v0.7.1 设置面板同族的「快照时机」问题。
+
+**修复**：`PageInjected` 增加 `getWorkspaces()` **活读器**（每次渲染现取快照），0.8.1 发布并复验。
+**规则**：凡依赖运行期数据的服务投影，必须活读，禁止注册期静态快照。
+
+### 隐患处置 0803：exact 路由绕过 `/api` 前缀鉴权
+
+**发现**：`/api/scheduled-send/*` 以 `webServer.register({kind:'exact'})` 注册，**不经过**
+`connection.admit` 的 `/api` 前缀判定——0.7.x 时代路由无显式鉴权，公网入口（CF Tunnel）下等于
+未登录即可管理任务。
+
+**处置**：0.8.0 起每条路由入口 `connection.requestRejection({headers})`（401/403 JSON）；
+`routes-test.mjs` 固化「拒绝时业务 handler 未被调用」回归；e2e 脚本改 token→cookie 真实凭据链路。
+**规则**：插件自注册 exact 路由 = 自己负责鉴权，这一条对 monorepo 全部插件适用。
+
+### 测试坑 0804：jsdom 定时器捕获晚于首个 effect
+
+**症状**：`ui-hooks-regression-test` 中 `window.setInterval` 覆写没拦住组件轮询，poll 不可驱动。
+
+**修复**：`Object.defineProperty(window,'setInterval',...)` 必须在**首次渲染前**安装，
+捕获回调后在 `act()` 内手动触发。
+
+---
+
 ## 历史沿革（要点）
 
 - **2026-09-10（v0.1.0）**：装包即崩两连击——pnpm 按 lockfile integrity 不重解压的旧 tgz 缓存，
@@ -278,6 +319,8 @@ properties of undefined (reading 'manager')"。
 - **2026-09-11（v0.6.0）**：3082 崩溃循环根因复盘，落地构建布局卫生检查、产物门禁、安装后验证器与一键安装脚本；
   同期修「打开会话」`this` 绑定丢失（方法解构调用）。
 - **2026-09-11（v0.6.1）**：「打开会话」二次根因——client 插件 `inject` 漏 `'sessions'`；补三层防再犯。
+- **2026-10-26（v0.8.0–v0.8.1）**：复活重构批——上游类型包不可 import（TS2307）、注册期静态快照致
+  工作区列表为空、exact 路由鉴权缺口补闭、jsdom 定时器捕获时序。详见上文同批事故条目。
 
 > 后续 v0.7.0–v0.7.2「设置面板空白」三层根因链（组件直接函数调用 → 条件 hook → JobList hooks 顺序漂移）
 > 的过程流水记在 `CHANGELOG.md` 与 `../需求/BRD-业务需求说明书.md` §2.6 / §5，本文件不再复述。

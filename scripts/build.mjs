@@ -123,6 +123,12 @@ async function verifyArtifacts() {
   if (!clientSrc.includes("conversation.input.right")) fail("lib/client.js 未注册 conversation.input.right 插槽");
   if (!clientSrc.includes("conversation.input.dock")) fail("lib/client.js 未注册 conversation.input.dock 插槽（定时排队）");
   if (!clientSrc.includes("settings.section")) fail("lib/client.js 未注册 settings.section 插槽");
+  if (!clientSrc.includes("sidebar.panellist")) fail("lib/client.js 未注册 sidebar.panellist 插槽（左侧定时任务入口）");
+  if (!clientSrc.includes("sidebar.brand.name")) fail("lib/client.js 未注册 sidebar.brand.name（品牌区隐藏）");
+  if (!clientSrc.includes("sidebar.brand.mark")) fail("lib/client.js 未注册 sidebar.brand.mark（品牌区隐藏）");
+  if (!clientSrc.includes('key: "scheduled-send"') && !clientSrc.includes("key:\"scheduled-send\"")) {
+    fail("lib/client.js 未注册 main 页面 key=scheduled-send");
+  }
   // 组件注册形态不变式（v0.7.0 防回归）：SettingsSection 必须经 createElement 渲染，
   // 禁止 "(ui.SettingsSection)(props)" 直接函数调用（曾致设置面板空白，见 docs/specs/001/plan.md）。
   if (!clientSrc.includes("createElement(ui.SettingsSection") || clientSrc.includes("SettingsSection)(")) {

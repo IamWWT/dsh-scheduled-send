@@ -1,64 +1,177 @@
 /**
  * dsh-scheduled-send — 共享类型（Host / Client 双端共用）。
  *
- * 领域模型：一条"定时发送任务"= 一段文本 + 目标会话 + 触发时刻。
- * 到点后由 host 把文本以 mode:'queue' 投递进目标会话的持久队列（Inbox next-turn），
- * 复用 dsh 既有排队机制：agent 运行中逐步消费，空闲时立即成为下一轮。
+ * 0.8.0 起本插件不再自己维护定时器与 jobs.json：
+ * 调度、持久化、重复规则、会话投递全部复用宿主公开服务 `ctx.schedule`
+ *（@deepseek-ai/dsh-schedule）。本文件只描述：
+ *   - 插件对官方任务记录的视图（附工作区 / 有效期 / 最近执行等插件元数据）；
+ *   - 插件自有 HTTP API 的请求/响应；
+ *   - 执行状态事件（仅用于本插件列表展示与排障）。
  */
 
-/** 任务状态机：pending（待触发）→ sent（已投递）/ missed（触发时投递失败）/ cancelled（用户取消）。 */
-export type JobStatus = "pending" | "sent" | "missed" | "cancelled";
+/** 官方 Schedule 的频率种类（含历史 after）。 */
+export type Frequency =
+  | { kind: "after"; afterSeconds: number }
+  | { kind: "once"; at: string }
+  | { kind: "every"; seconds: number }
+  | { kind: "daily"; time: string; timeZone: string }
+  | { kind: "weekly"; time: string; timeZone: string; weekdays: number[] }
+  | { kind: "cron"; expression: string; timeZone: string };
 
-/** 一条持久化定时任务记录。 */
-export interface ScheduledJob {
-  /** 任务 id（client 生成或 host 生成；唯一）。 */
+/** 官方任务最近一次收件箱投递回执（不等于模型执行结果）。 */
+export interface DeliveryReceipt {
+  scheduledAt: string;
+  deliveredAt: string;
+  messageId: string;
+}
+
+/** 本插件观察到的最近一次模型执行结果。 */
+export type ExecutionStatus =
+  | "success"
+  | "failed"
+  | "aborted"
+  | "blocked"
+  | "max-tokens"
+  | "interrupted";
+
+export interface ExecutionRecord {
+  status: ExecutionStatus;
+  at: number;
+  durationMs: number;
+  summary?: string;
+  error?: string;
+}
+
+/** 模型路由引用（官方 ModelSelection 的 provider+model 子集；label 仅展示用）。 */
+export interface ModelRef {
+  provider: string;
+  model: string;
+  providerName?: string;
+  modelName?: string;
+}
+
+/** 官方任务 + 插件元数据，供页面列表使用。 */
+export interface TaskView {
+  /** 官方 ScheduleId。 */
   id: string;
-  /** 目标会话 id（dsh session id）。 */
+  title: string;
+  prompt: string;
   sessionId: string;
-  /** 会话标题快照（仅展示用；host 不校验）。 */
   sessionTitle?: string;
-  /** 到点发送的文本内容（多行 OK）。 */
-  text: string;
-  /** 触发时刻（epoch 毫秒，本地时区语义——由 client 按浏览器时区换算后提交）。 */
-  fireAt: number;
-  status: JobStatus;
-  /** 创建时刻（epoch ms）。 */
+  workspaceId?: string;
+  frequency: Frequency;
+  /** 官方记录里已提交的下一次（或最终）触发时刻，RFC3339 UTC。 */
+  scheduledAt: string;
+  /** 官方 active/inactive；inactive = 已结束，但记录仍可查看。 */
+  status: "active" | "inactive";
+  /** 插件元数据：重复任务的截止时刻（epoch ms）；到期后插件删除官方任务。 */
+  endsAt?: number;
+  /** 插件元数据：是否推送执行状态（当前版本由 notify-alert 全局控制，保留字段供后续）。 */
+  notify: boolean;
+  /** 插件元数据：建任务会话时指定的 agent preset（现有会话为 undefined，preset 锁定）。 */
+  agentPreset?: string;
+  /** 插件元数据：任务绑定的模型（应用时刻 = 创建/更新时对目标会话 selectModel）。 */
+  model?: ModelRef;
+  /** 插件记录的创建时刻（epoch ms）。 */
   createdAt: number;
-  /** 实际触发时刻（epoch ms）；pending 时缺省。 */
-  firedAt?: number;
-  /** 投递失败原因（仅 missed）。 */
-  error?: string;
-  /** 用户备注（可选）。 */
-  note?: string;
+  lastDelivery?: DeliveryReceipt;
+  lastExecution?: ExecutionRecord;
 }
 
-/** GET /jobs 的响应。 */
-export interface JobsResponse {
-  ok: boolean;
-  jobs: ScheduledJob[];
-  version: string;
+/** 新建任务请求。 */
+export interface TaskCreateRequest {
+  title: string;
+  prompt: string;
+  frequency: Frequency;
+  /** 新任务在哪个工作区创建专属会话；与 sessionId 二选一。 */
+  workspaceId?: string;
+  /** 沿用现有会话；与 workspaceId 二选一。 */
+  sessionId?: string;
+  /** 重复任务截止时刻（epoch ms）；缺省 = 长期有效。 */
+  endsAt?: number;
+  notify?: boolean;
+  /** 新会话使用的 agent preset id（仅 workspaceId 路径生效；现有会话 preset 已锁定）。 */
+  agentPreset?: string;
+  /** 对目标会话应用的模型；缺省 = 不指定（新会话用全局默认，现有会话跟随现状）。 */
+  model?: ModelRef;
 }
 
-/** POST /jobs 请求体（创建或修改任务）。 */
-export interface JobUpsertRequest {
-  /** 缺省 = 新建（host 生成 id）；给出 = 更新该任务。 */
-  id?: string;
+/** 更新任务请求；所有字段可选，省略保留原值。 */
+export interface TaskUpdateRequest {
+  id: string;
+  title?: string;
+  prompt?: string;
+  frequency?: Frequency;
+  /** null = 清除截止时间（长期有效）；undefined = 保留。 */
+  endsAt?: number | null;
+  notify?: boolean;
+  /** 重新应用模型到绑定会话；null = 仅清插件记录（不回滚会话模型）。 */
+  model?: ModelRef | null;
+}
+
+/** 删除请求。 */
+export interface TaskDeleteRequest {
+  id: string;
+}
+
+/** 立即执行请求。 */
+export interface TaskRunRequest {
+  id: string;
+}
+
+/** 历史投递查询。 */
+export interface TaskHistoryRequest {
   sessionId: string;
-  sessionTitle?: string;
-  text: string;
-  /** 触发时刻（epoch ms）。必须 > 当前时间。 */
-  fireAt: number;
-  note?: string;
+  id: string;
+  limit?: number;
+  before?: string;
 }
 
-export interface JobUpsertResponse {
+export interface ApiOk<T> {
+  ok: true;
+  version: string;
+  task?: T;
+}
+
+export interface ApiErr {
+  ok: false;
+  error: string;
+}
+
+export type ApiResult<T> = ApiOk<T> | ApiErr;
+
+export interface TaskListResponse {
   ok: boolean;
-  job?: ScheduledJob;
+  version: string;
+  tasks: TaskView[];
+  scheduleService: boolean;
   error?: string;
 }
 
-/** DELETE /jobs/:id 响应（cancel 语义；pending 之外为幂等 no-op）。 */
-export interface JobCancelResponse {
+export interface HealthResponse {
   ok: boolean;
+  version: string;
+  scheduleService: boolean;
+  active: number;
+  total: number;
+  error?: string;
+}
+
+/** 官方投递历史的一页（原样透传，避免复制上游类型）。 */
+export interface TaskHistoryPage {
+  records: DeliveryReceipt[];
+  nextBefore?: string;
+  earlierRecordsUnavailable?: boolean;
+}
+
+/** 执行状态事件（Host 内部/日志用；不跨插件发送）。 */
+export interface ExecutionEvent {
+  tasks: { id: string; title: string }[];
+  sessionId: string;
+  status: ExecutionStatus;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  summary?: string;
   error?: string;
 }

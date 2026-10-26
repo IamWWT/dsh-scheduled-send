@@ -16,9 +16,10 @@ date: 2026-10-08
 
 | 文档 | 一句话 |
 |---|---|
-| [[../README\|README]] | 插件定位、能力清单、安装方式 |
+| [[../README\|README]] | 插件定位、能力清单、安装方式（含效果截图） |
 | [[README\|docs 总览]] | 文档体系总览与阅读路径 |
 | [[glossary\|术语表]] | 本插件专有术语 |
+| `images/` | 效果截图（sidebar / task-list / create-dialog，隔离实例生成，README 引用） |
 
 ## docs/ 需求
 

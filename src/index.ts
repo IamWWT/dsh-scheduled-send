@@ -1,36 +1,38 @@
 /**
  * dsh-scheduled-send — Host 入口（Node 侧）。
  *
- * 职责：
- *   - 解析状态目录（$DSH_HOME/profiles/<profile>/scheduled-send，config.stateDir 可覆盖）；
- *   - 构造并恢复 Scheduler（jobs.json 持久化 + 重启补投）；
- *   - 把 host 上下文挂给 Scheduler（fire 时取 sessionController）；
- *   - 注册 /api/scheduled-send/* 路由。
+ * 0.8.0 起不再自己实现定时器/任务表：调度器 = 宿主公开服务 `ctx.schedule`
+ *（@deepseek-ai/dsh-schedule）。本插件负责：
+ *   - WorkBuddy 式任务表单 / 任务列表（HTTP API + client UI）；
+ *   - 在所选工作区创建专属任务会话；
+ *   - 官方没有的“截止时间”（到期删除官方任务）；
+ *   - 观察官方投递 + turn/end，记录执行结果供页面展示。
  *
- * 不重造轮子：到点投递走 dsh 原生 sessionController.prompt({mode:'queue'})，
- * 复用 Inbox next-turn 持久队列（agent 运行中排队消费 / 空闲即下一轮）。
+ * 不重造轮子：投递、重复规则、持久化、冷会话恢复全部由官方 Schedule 负责。
  */
-import { Scheduler, type HostCtx } from "./host/scheduler.ts";
+import { ScheduleBridge, type ExecutionUpdate } from "./host/bridge.ts";
 import { registerRoutes } from "./host/routes.ts";
 import { dshHome } from "./shared/dsh-home.ts";
 
 export const name = "scheduled-send";
 
 /**
- * Cordis 依赖注入声明：访问 ctx.webServer 前必须声明，否则代理抛
- * "cannot get property 'webServer' without inject"（webServer 由
- * @deepseek-ai/dsh-host-webserver 提供，仅 web profile 存在）。
+ * Cordis 依赖注入声明：官方 Schedule 服务与 Session 控制面是硬依赖；
+ * webServer 用于本插件 HTTP 路由。connection 由路由惰性解析（旧宿主可能没有）。
  */
-export const inject = ["webServer"];
+export const inject = ["webServer", "schedule", "sessionController"];
 
 /** 与 package.json 同步。 */
-export const VERSION = "0.7.4";
+export const VERSION = "0.9.5";
 
-export { Scheduler, type HostCtx } from "./host/scheduler.ts";
-export type { SchedulerConfig, SessionControllerFace } from "./host/scheduler.ts";
+export { ScheduleBridge, type ExecutionUpdate } from "./host/bridge.ts";
+export type { TaskMeta } from "./host/meta.ts";
 export { registerRoutes } from "./host/routes.ts";
 export { sessionOpenerOf } from "./shared/session-opener.ts";
 export { sessionMetaOf } from "./shared/session-meta.ts";
+
+/** 兼容旧导入名（0.7.x 的测试/文档曾用 Scheduler）。 */
+export { ScheduleBridge as Scheduler } from "./host/bridge.ts";
 
 export interface PluginConfig {
   /** 状态目录；"" = $DSH_HOME/profiles/<profile>/scheduled-send。 */
@@ -49,18 +51,20 @@ function resolveStateDir(configured: string | undefined): string {
 }
 
 export function apply(ctx: unknown, config: Partial<PluginConfig> = {}): void {
-  const c = ctx as HostCtx;
   const stateDir = resolveStateDir(config.stateDir);
-  const scheduler = new Scheduler({ stateDir, version: VERSION });
-  scheduler.attach(c);
-  scheduler.resumeAll(c);
-  if (c.effect) {
-    c.effect(() => {
-      registerRoutes(c, scheduler, VERSION);
-      return () => scheduler.stop();
+  const bridge = new ScheduleBridge(ctx, stateDir, VERSION);
+  bridge.onExecution = (update: ExecutionUpdate) => {
+    const label = update.taskIds.length > 0 ? update.taskIds.join(",") : update.sessionId;
+    console.log(`[dsh-scheduled-send] execution ${update.status} ${label} ${update.durationMs}ms`);
+  };
+  bridge.start();
+  const host = ctx as { effect?: (fn: () => () => void) => void };
+  if (typeof host.effect === "function") {
+    host.effect(() => {
+      registerRoutes(ctx, bridge, VERSION);
+      return () => bridge.stop();
     });
   } else {
-    // 无 effect（如单元环境）：直接注册，跳过清理钩子
-    registerRoutes(c, scheduler, VERSION);
+    registerRoutes(ctx, bridge, VERSION);
   }
 }

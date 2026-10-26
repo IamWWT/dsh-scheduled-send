@@ -1,3 +1,116 @@
+## 0.9.5 — 2026-10-26 收起按钮与新会话按钮并排（不重叠）
+
+用户反馈（生产）：收起按钮叠在「新会话」按钮右端，两个框重叠难看。
+
+- 新会话按钮经 `.dss-logo-shift + button` 让出右端 40px；收起按钮绝对定位落进该空档
+  （`top:calc(100% + 9px); right:0`，与其垂直居中对齐）——两按钮矩形不相交。
+- 隔离 3084 + 生产 3082 Playwright 断言：对齐、不重叠、折叠轨道标识可见、点击可展开、console 零报错。
+
+## 0.9.4 — 2026-10-26 折叠轨道恢复「展开侧栏」可见标识
+
+用户反馈（生产）：侧栏折叠后顶部展开按钮没有可见标识（悬停才有），不友好。
+
+- 根因：轨道展开按钮的 railMark 与品牌区共用 `sidebar.brand.mark` 插槽，0.9.2 把 mark 注册成空
+  实现时一并清掉了它。
+- mark 插槽改渲染面板线条图标（`data-dss-brand="mark"`），CSS 按容器区分：默认隐藏（展开态品牌区），
+  `[class*="railMark"]` 内显示（折叠轨道）；悬停换官方 panelIcon 的行为不受影响。
+
+## 0.9.3 — 2026-10-26 收起按钮并入「新会话」行
+
+用户反馈：品牌区移除后顶行空着，「收起侧栏」按钮应放到「新会话」旁边。
+
+- 官方对收起按钮/新会话行**没有插槽**，实现为：`sidebar.brand.name` 注册 `BrandShift` 组件，
+  挂载 effect 用自身 DOM 位置 `closest('div[data-window-drag]')` 找到 logoRow 打标记类
+  `dss-logo-shift`（卸载即摘除），纯 CSS 压扁顶行（60→14px）并把收起按钮绝对定位到新会话行右端。
+- **不搬 DOM 节点**（手动移动会被宿主折叠动画重渲染吞掉）；`:has([data-dss-brand])` 排除品牌按钮，
+  macOS 顶栏布局（收起按钮不在 logoRow）自动不命中、不移位。
+
+## 0.9.2 — 2026-10-26 品牌区整块移除
+
+用户反馈：0.9.0 的「收缩成一行」不算去掉，要求彻底移除左上角 DSH 构建标识。
+
+- `sidebar.brand.name` / `sidebar.brand.mark` 注册空实现（`BrandHidden`），「DSH · 本地构建」与
+  版本徽标整块不再占纵向空间；外层品牌按钮（点击=新会话）由官方容器保留，功能无损失。
+- 构建门禁新增 `sidebar.brand.name|mark` 插槽断言；桌面版装了 ui-brand-official 时让位（catch 跳过）。
+
+## 0.9.1 — 2026-10-26 弹窗高度修复
+
+用户反馈（生产）：「添加定时任务」弹窗在常见视口下过高，底部「取消/创建任务」被屏幕裁掉。
+
+- `.dss-modal` 改 `max-height:calc(100vh - 48px)` + `overflow:hidden`；
+  表单容器加 `dss-modal-form`（`flex:1;min-height:0;overflow:auto`）——**表单区内部滚动**；
+  `.dss-modal .dss-actions` 改 `position:sticky;bottom:0`（带背景）——**按钮恒可见**。
+- 提示词 textarea 默认高度 120→88px，减少滚动需求。
+- 隔离实例复验（1440×960）：弹窗完整含按钮一屏出镜，截图 `screenshots/03-create-dialog.png`。
+
+## 0.9.0 — 2026-10-26 事件形状修复 + 目标会话/preset/模型
+
+**修复（生产实测定位）**：`session/event` 的 `user/message` 载荷把 `content/source` 直接挂在
+`data` 下（`assistant/message` 才有 `data.message`）；0.8.x 按 `data.message` 解析导致执行状态
+全链路静默（`lastExecution` 不写、notify 不推）。`bridge.ts` 改读 `data.message ?? data`；
+smoke-test 新增真实形状回归用例（turn/start→schedule 投递→assistant→turn/end →
+ExecutionUpdate + meta 写回）——此链路此前无离线覆盖，是漏检根因。
+
+**新增（用户需求：WorkBuddy 式表单补齐三项控制）**
+
+- **发送到**：`新建任务会话`（选工作区，行为同前）/ `现有会话`（会话下拉，来自
+  `sessions.list.getSnapshot()` 活读，含标题与当前 preset 展示）。
+- **Agent 模式（preset）**：仅新会话可选（官方 `SessionCreateRequest.agentPreset` 创建时一步绑定；
+  现有会话 preset 首轮后锁定，表单只读展示）。清单数据源 `remote.agentPresets.list`（8s 超时 +
+  失败降级"留空用默认"）。
+- **执行模型**：下拉数据源 `remote.session.modelCatalog`（10s 超时）；保存时经公开方法
+  `sessionController.selectModel` 应用到绑定会话（与手动切换同链路，**会同步更新全局默认模型**，
+  表单已注明）；模型不可用即创建失败，不建半坏任务。meta 记 `model {provider,model,label}`，
+  列表行展示模型徽章；编辑可换模型，`model:null` 仅清记录不回滚。
+- 类型面：`ModelRef`、`TaskCreateRequest.agentPreset/model`、`TaskUpdateRequest.model`、
+  `TaskView.agentPreset/model`；`SessionControllerLike` 补 `agentPreset?` 与 `selectModel?`。
+- client `inject` 增 `remote.agentPresets`、`remote.session`。
+- **品牌区收缩**（用户反馈：左上角「DSH 本地构建 + 版本徽标」两行占纵向空间）：注册 single 插槽
+  `sidebar.brand.name` 为一行紧凑文字（官方外层「点击=新会话」保留）；已有占位者（如桌面版
+  `ui-brand-official`）时让位跳过。`sidebar.brand.name` 进产物门禁。
+
+## 0.8.1 — 2026-10-26 隔离实测修复
+
+- **工作区下拉实时化**：注册时静态快照在启动早期为空 → 「没有可用工作区」。改为 `entry.ts`
+  提供 `getWorkspaces()` 活读器（每次渲染 `ctx.get("workspaces")?.list.getSnapshot()`），
+  `TaskModal` 用活读器取目标工作区列表。
+- **验证收口**：Playwright（3084 隔离实例）确认侧栏「定时任务」出现、官方「自动化任务」隐藏、
+  建表单条任务成功、console 零报错；`scripts/e2e-3082.mjs` 重写为新 `/tasks` 契约
+  （token→cookie 原生鉴权、create/list/update/delete 探针），对隔离实例全通过。
+- 删除旧自建调度器残留 `src/host/scheduler.ts`（0.7.x 形态退役）。
+
+## 0.8.0 — 2026-10-26 复活重构：调度整体复用官方 Schedule 服务
+
+需求（用户）：像 WorkBuddy 一样按「名称/提示词/频率/有效期/工作区/通知」定时执行提示词，
+并把执行状态经 dsh-notify-alert 推到微信；官方「自动化任务」UI 不再展示，日常用本插件。
+
+- **引擎替换**：删除自建定时器/队列表，任务真身 = 官方 `ctx.schedule`
+  （`at/after/every/daily/weekly/cron`，`catalog/create/update/delete/deleteInactive/history`），
+  持久化、重启恢复、错过补投、会话投递全部复用官方实现；插件只做控制面。
+- **新表单与页面**（WorkBuddy 式）：`TaskModal`（名称/提示词/频率 5 种/有效期/工作区/通知勾选/
+  展示性「允许完全访问」说明）；主页面 `TaskPage`（统计 + active 列表 + 已结束折叠 + 一键清理）；
+  侧栏入口 `sidebar.panellist: scheduled-send`（「定时任务」）；输入框快捷一次性排期
+  （`conversation.input.right` + `dock`）。
+- **工作区任务会话**：`create` 未指定 sessionId 时自动
+  `sessionController.create({workspaceId})` + `rename(任务名)`，任务绑定新会话。
+- **有效期**：`endsAt` 落插件元数据 `tasks-meta.json`（`MetaStore`，原子写 + 对账 `reconcile`），
+  到期分片定时器（>2^31ms 拆段）自动删官方任务。
+- **执行状态观察**：`session/event` 上解析官方 schedule framing
+  （`[SCHEDULE REMINDER]` / `[SCHEDULE REMINDER BATCH]` 的 `schedule_id_json`/`reminders_json`），
+  `turn/end.reason.kind` → `success/failed/aborted/blocked/max-tokens/interrupted`（forked 不通知），
+  写回 meta 并暴露 `ExecutionUpdate`；通知发送由 dsh-notify-alert ≥0.9.0 独立观察同组事件完成，
+  **无插件间依赖**。
+- **鉴权补齐**：`/api/scheduled-send/*` exact 路由绕过 `/api` 前缀鉴权，每条路由显式
+  `connection.requestRejection({headers})`（401/403 JSON）。
+- **类型解耦**：不 import `@deepseek-ai/*`（构建解析不到，TS2307）；`bridge.ts` 以本地结构化
+  接口（`ScheduleServiceLike` 等）声明宿主面。
+- 路由新契约：`GET/POST /tasks`、`POST /tasks/update|delete|delete-inactive|run|history`；
+  旧 `/jobs*` 全部退役。测试重写（smoke/routes/ui-hooks 对 `ScheduleBridge`/`TaskPage`）。
+- 官方 UI 隐藏口径：profile patch `- id: ui-schedule` + `disabled: true`（host `schedule` 服务不受影响）。
+
+> 归档与复活：2026-10-18 曾以 0.7.4 归档至 public 仓 `IamWWT/dsh-scheduled-send`；
+> 2026-10-26 解除 archived，回到 `dsh-plugins/` 目录继续维护（该目录始终是独立 git 仓库）。
+
 ## 0.7.4 — 2026-09-25
 
 改进插件页面布局、窄容器适配与键盘焦点；具体范围和验证见 `docs/需求/BRD-20260925-experience.md` 与 `docs/管理/PP-20260925-experience-计划.md`（原 `docs/specs/20260925-experience/` 目录已不存在）。

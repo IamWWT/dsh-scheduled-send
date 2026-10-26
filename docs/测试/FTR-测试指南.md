@@ -3,165 +3,156 @@
 ## 当前状态
 
 - 文档性质：操作手册（分层测试与验收操作指南）
-- 对应版本：v0.7.4
-- 状态：有效（命令、门禁与手工验收清单与当前代码一致；2026-09-25 体验批次的「隔离实例真实加载及页面验证」「安装至 3082 并记录验证与限制」截至本批**未闭环、未验证**，见 `docs/管理/PP-20260925-experience-任务.md`）
+- 对应版本：v0.9.5
+- 状态：有效（测试面对象 = `ScheduleBridge`（官方 schedule 服务控制面）+ `/tasks` 路由契约）
 - 维护者：AI + 用户
 
-> 测试分层：**单元测试（离线、纯 Node）→ 产物门禁（构建时）→ 端到端（3082 在线，需重启后）→ 手工 UI 验收**。
+> 测试分层：**单元测试（离线、纯 Node，mock 官方服务）→ 产物门禁（构建时）→ 隔离实例真实加载
+> （Playwright，独立 home + 3084）→ 端到端 API（活实例，token 鉴权）→ 手工 UI 验收**。
 > 测试通过后再重启 dsh-dev-web（本插件约定：重启前征求用户同意）。
 
 ## 0. 命令速查
 
 ```bash
 pnpm check             # 全部离线测试：门禁构建 + host/client typecheck + 下 5 个测试脚本
-pnpm test              # 离线单元测试（不含构建门禁/typecheck，无 3082 依赖）
-node test/smoke-test.mjs   # 仅 Scheduler 层
-node test/routes-test.mjs  # 仅 HTTP 路由层
-node test/session-opener-test.mjs  # 仅「打开会话」跳转 helper（this 绑定）
-node test/session-meta-test.mjs    # 仅会话标题/cwd 派生纯函数
-node test/ui-hooks-regression-test.mjs  # React UI hooks 稳定性（#310 防复发，jsdom+ErrorBoundary）
-pnpm verify:installed      # 安装布局验证（缺 lib/ / 扁平残留就地拦截）
-node scripts/e2e-3082.mjs  # 3082 在线 API 端到端（需重启后）
+pnpm test              # 离线单元测试（不含构建门禁/typecheck）
+node test/smoke-test.mjs             # ScheduleBridge 层（mock 官方 schedule/sessionController）
+node test/routes-test.mjs            # HTTP 路由层（含 401 鉴权回归）
+node test/session-opener-test.mjs    # 「打开会话」跳转 helper（this 绑定）
+node test/session-meta-test.mjs      # 会话标题派生纯函数
+node test/ui-hooks-regression-test.mjs  # TaskPage hooks 稳定性（#310 防复发，jsdom+ErrorBoundary）
+pnpm verify:installed  # 安装布局验证（缺 lib/ / 扁平残留就地拦截）
+node scripts/e2e-3082.mjs <base> --token <启动token> [--workspace <id>|--session <id>]  # 活实例 API 端到端
 ```
 
 ## 1. 单元测试
 
-### 1.1 `test/smoke-test.mjs` — Scheduler 层（9 场景）
+### 1.1 `test/smoke-test.mjs` — ScheduleBridge 层
 
-纯 Node，直接 `import lib/index.js` 的 `Scheduler`，用临时目录隔离 `jobs.json`。
+纯 Node，mock 官方 `schedule` 服务（catalog/create/update/delete/deleteInactive）与
+`sessionController`（create/rename/prompt），临时目录隔离 `tasks-meta.json`。
 
-| # | 场景 | 断言要点 |
-|---|---|---|
-| 1 | 新建 + 列表 | `add()` 返回 pending 任务、出现在 `list()`、`get(id)` 可取 |
-| 2 | fireAt 必须晚于当前 | 过去时间抛 `晚于` |
-| 3 | 更新 | 文本/时刻可改 |
-| 4 | fire 投递 | mock `sessionController.prompt` 被调用，`mode === "queue"`，内容正确 |
-| 5 | fire 失败 → missed | prompt 抛错 → 状态 `missed` + error 记录 |
-| 6 | 取消 + 删除 | `cancel` → `cancelled`；`delete` → 从列表移除 |
-| 7 | 持久化往返 | 重新 `load()` 后任务仍在（sent 状态保留） |
-| 8 | 每会话最多 3 个 | 第 4 个同会话 pending 被拒；不同会话不受影响 |
-| 9 | 最晚边界 | `Scheduler.maxFireAt()` = 明天 23:59:59.999；超过被拒 |
+| 场景组 | 断言要点 |
+|---|---|
+| 建任务（选工作区） | `sessionController.create({workspaceId})` + `rename(任务名)` 被调；官方 `create` 收到绑定该会话的请求；meta 落 `workspaceId/sessionTitle/notify/createdAt` |
+| 建任务（已有会话） | 不新建会话，直接绑定 `sessionId` |
+| 列表 | 官方 `catalog` 行 + meta 合并为 `TaskView`（frequency 还原、下次执行、`lastExecution`）；meta 缺失行走默认值 |
+| 更新 | 标题/提示词/频率/`endsAt` 变更 → 官方 `update` 载荷正确 + meta 同步 |
+| 立即执行 | `runNow` → 官方投递通道被调 |
+| 删除 | 官方删除 + meta 行清掉（`reconcile` 对账一致） |
+| 参数校验 | 缺 title/prompt、非法 cron、非法星期 → 明确抛错，不落半坏任务 |
+| 有效期到期 | `endsAt` 到点 → 官方任务被 `delete`（分片定时器测试用短时限注入） |
 
-### 1.2 `test/routes-test.mjs` — HTTP 路由层（16 项）
+### 1.2 `test/routes-test.mjs` — HTTP 路由层
 
-用 mock `webServer` 捕获 handler + EventEmitter 模拟 req/res 直接调用 `registerRoutes`。
-**每个调用带 2s 超时守卫**——这正是针对 v0.5.0「readBody 误传 res → 永久挂起」根因的回归测试。
+mock `webServer` 捕获 exact handler + EventEmitter 模拟 req/res 直接调 `registerRoutes`；
+每个调用带超时守卫（v0.5.0「readBody 误传 res → 永久挂起」的回归位）。
 
 | 端点 | 覆盖 |
 |---|---|
-| `GET /health` | 版本/统计字段 |
-| `GET /jobs` | 空表、列表形状 |
-| `POST /jobs` 新建 | 缺 sessionId / 缺 text / fireAt 过去 / 超明天结束 均拒绝；正常创建 pending；每会话第 4 个被拒 |
-| `POST /jobs` 更新 | **仅 `{id,text}` 可更新**（真实客户端形态，v0.6.0 修复）；空 text 拒绝；无 text 无 fireAt 拒绝 |
-
-> 注（2026-10-13）：上表行 4 描述的是**真实客户端**的编辑请求形态；host 侧 `POST /jobs` 的 update 分支
-> 实际接受"至少给 `text` 或 `fireAt` 之一"（`src/host/routes.ts` 的 `if (body.id)` 分支），`note` /
-> `sessionTitle` 亦可更新——测试未覆盖 `{id,fireAt}` 这一路。
-| `POST /jobs/fire` | mock prompt 被调用、`mode:queue`、读取更新后的文本 |
-| `POST /jobs/cancel` / `delete` | 状态流转 + 移除 |
-| 非法 JSON / 不支持方法 | 400 / 405 |
+| `GET /health` | `ok/version/active/total`；官方服务缺失 → 503 + error |
+| `GET/POST /tasks` | 列表形状；创建载荷透传 bridge；bridge 抛错 → 200 + `ok:false`（人话 error） |
+| `POST /tasks/update` | 缺 id → 400；正常 → 更新后 task |
+| `POST /tasks/delete` / `delete-inactive` / `run` / `history` | 参数校验 + 成功形状 |
+| 方法不支持 | 405 + `ok:false` |
+| **鉴权** | mock `connection.requestRejection` 返回 401/403 → 响应码与文案一致，**业务 handler 未被调用**（exact 路由绕过 `/api` 前缀鉴权的回归位） |
 
 ### 1.3 `test/session-opener-test.mjs` — 会话跳转 helper（3 项）
 
-针对 v0.6.0 真实故障「打开会话报 `Cannot read properties of undefined (reading 'manager')`」：
-DSH 的 `ISessions.open(id)` 方法体依赖 `this.manager`（`open(){ this.manager.select(id) }`），
-若调用方 `const f = svc.open` 再 `f(id)`，`this` 变 undefined 即崩。修复为
-`sessionOpenerOf(svc)` 保引用调用（`open.call(svc, id)`）。
+「打开会话」必须保 `this` 引用调用（`open.call(svc, id)`）；DSH `ISessions.open` 方法体依赖
+`this.manager`，解构裸调即崩（v0.6.0/v0.6.1 真实故障）。伪服务复现旧姿势 → `sessionOpenerOf` 正常
+→ 服务缺失降级返回 undefined。
 
-| # | 场景 | 断言 |
-|---|---|---|
-| 1 | 用「方法体依赖 this」的伪服务复现旧姿势 | 解构调用抛 `reading 'manager'`（证明 bug 真实存在） |
-| 2 | `sessionOpenerOf` 正常服务 | 跳转函数可调用，`manager.select` 按序收到 id（this 绑定正确） |
-| 3 | 降级 | 服务缺失 / 无 open / open 非函数 → 返回 undefined |
+### 1.3b `test/ui-hooks-regression-test.mjs` — TaskPage hooks 稳定性
 
-> 为什么要有它：此前该 UI 跳转无任何离线测试覆盖（host 单测不涉及客户端服务调用），
-> 端到端脚本也只测 API 不测跳转——手工清单已补验。
+react-dom/client + jsdom + ErrorBoundary：同一 root 渲染 `TaskPage` 两次（空列表 → 有任务），
+mock `fetch` 与 `window.setInterval`（`Object.defineProperty` 先装再渲染，捕获 poll 后在 `act` 内驱动）。
+hooks 数量漂移（#310）→ ErrorBoundary 捕获即失败。断言任务标题渲染出镜。
 
-### 1.3b `test/ui-hooks-regression-test.mjs` — React hooks 稳定性（1 项）
+### 1.3c `test/session-meta-test.mjs` — 会话元数据派生
 
-针对 v0.7.2 真实故障 #310「Rendered more hooks」：JobList 的 `useState(collapsed)`
-曾位于 `if (jobs.length===0) return` 之后，jobs 空/有切换导致 hooks 数量漂移 →
-渲染崩溃 → 设置面板空白。测试用 react-dom/client + jsdom + ErrorBoundary 渲染同一
-JobList 两次（jobs=[] → 有数据），边界捕获 #310 即失败。已实测 bug 形态退出 1、
-修复形态退出 0。
+`shared/session-meta.ts` 纯函数：`byId` 投影折叠为 `sessionId -> {title, cwd}` 查询表；
+displayTitle 优先、回退 title、缺字段不抛、空投影返回 `{}`。组件内禁止条件 hook，故由 entry 层取快照后传入。
 
-> 为什么单测/SSR 测不出：单测不渲染 React；SSR 每次独立渲染，不触发同一 root
-> 的状态漂移。只有"同一 root 两次渲染"能复现。
+### 1.3d notify-alert 侧配对测试（跨插件契约）
 
-### 1.3d `test/session-meta-test.mjs` — 会话元数据派生（4 项）
-
-`shared/session-meta.ts` 的纯函数 `sessionMetaOf(snap)`：把 dsh `useSessions` 投影的
-`byId`（`displayTitle`/`title`/`cwd`）折叠为 `sessionId -> {title, cwd}` 查询表，
-供设置面板展示目标会话的标题与工作目录。
-
-| # | 场景 | 断言 |
-|---|---|---|
-| 1 | displayTitle 优先 | 取 `displayTitle`，`cwd` 原样透传 |
-| 2 | 无 displayTitle | 回退 `title` |
-| 3 | 缺字段 | `title`/`cwd` 均为 `undefined`，不抛错 |
-| 4 | 空 / undefined 投影 | `sessionMetaOf(undefined)` / `({})` / `({byId:undefined})` 均返回 `{}` |
-
-> 为什么是纯函数：设置面板需要会话元数据，但组件内**禁止条件调用 hook**（v0.7.1/#310 铁律），
-> 故由 entry 层同步取快照（`sessions.list.getSnapshot()`）后经此函数算出普通对象传入。
+执行状态通知的行为覆盖在 **dsh-notify-alert `test/unit.test.mjs`**（0.9.0 块）：
+framing 解析（单条/批量）、`turn/end` reason → 状态映射（含 forked 不通知）、
+`scheduleExecSuccess=false` 静默且不回落普通 turn-end、`scheduleExec=false` 回落、
+zh/en 文案与合并键。两插件契约改动必须两侧同时跑。
 
 ### 1.4 产物门禁（`scripts/build.mjs` 内）
 
-构建后自动断言（失败即构建失败，进不了安装环节）：
-
 - 顶层布局卫生：无 `index.ts`/`client.js`/`build.mjs`/`client/`/`host/` 残留、无 `node_modules` 软链；
-- `lib/index.js` 可动态 import，导出 `Scheduler/VERSION/apply/inject/name`，`inject` 含 `webServer`；
-- `lib/client.js` 含 `__ModuleLoader__`、插件 id、`conversation.input.right`、`conversation.input.dock`、`settings.section`；
-- `lib/client.js` 的 `settings.section` 必须以 `createElement(ui.SettingsSection, …)` 形态注册（禁止直接函数调用，v0.7.0 回归项）。
+- `lib/index.js` 可动态 import，导出 `ScheduleBridge`/`Scheduler`/`VERSION`/`apply`/`inject`/`name`，
+  `inject` 含 `webServer`；
+- `lib/client.js` 含 `__ModuleLoader__`、插件 id、`sidebar.panellist`、`key: "scheduled-send"`（main 插槽）、
+  `conversation.input.right`、`conversation.input.dock`、`settings.section`；
+- `settings.section` 必须以 `createElement(ui.SettingsSection, …)` 形态注册（v0.7.0 回归项）。
 
-## 2. 端到端测试
+## 2. 隔离实例真实加载（0.8.1 已执行，2026-10-26）
 
-### 2.1 API 端到端 `scripts/e2e-3082.mjs`（自动化）
+- 环境：`ops/validation/dsh-scheduled-send-0.8.0/home`（独立 DSH_HOME + profile web，
+  bundle 依赖 notify-alert 0.9.0 + scheduled-send 0.8.1；profile patch 含 `- id: ui-schedule` + `disabled: true`），
+  端口 3084，系统 Chrome + Playwright。
+- 脚本：`ops/validation/dsh-scheduled-send-0.8.0/verify-ui.cjs`。
+- 断言（实测全真）：侧栏出现「定时任务」；**官方「自动化任务」不出现**；「添加定时任务」弹窗可填可交；
+  创建后列表出现「验证任务/待执行」；console 零报错；清理临时任务。
+- 证据：同目录 `screenshots/01-main.png`…`04-task-created.png`、`web.log`（token URL）。
 
-**前置**：用户已重启 dsh-dev-web 且加载当前版本；服务在 127.0.0.1:3082。
+## 3. 端到端测试
+
+### 3.1 API 端到端 `scripts/e2e-3082.mjs`（自动化，活实例）
+
+**前置**：dsh 已重启并加载当前版本；从启动日志取 `?token=`。
 
 ```
-node scripts/e2e-3082.mjs
+node scripts/e2e-3082.mjs http://127.0.0.1:3082 --token <t> --workspace <id>
 ```
 
-流程：health（**校验服务版本 == package.json 版本**，防"装错版本还以为生效"）→ jobs 列表 →
-创建一条临时 pending 任务 → 确认出现在列表 → cancel → delete → 清理后列表恢复。
-只操作临时任务、不 fire、不触碰真实会话消息，幂等可重复运行。
+流程：token 页面登录兑换 `dsh-auth-*` cookie → health（**校验服务版本 == package.json**）→
+tasks 列表 → 创建「次日 03:07 单次」探针任务（notify 关）→ 确认 active 列表 → update 改名 →
+delete → 列表恢复。只操作临时任务、不调 run、不投递真实消息，幂等可重复。
+（2026-10-26 已对 3084 隔离实例跑通全步骤。）
 
-### 2.2 手工 UI 验收清单（重启后）
+### 3.2 手工 UI 验收清单（生产重启后）
 
 | # | 步骤 | 期望 |
 |---|---|---|
-| 1 | 打开 3082，会话页输入框工具行 | 出现「⏰ 定时」标识，与模型标识同行（Vision Router 左侧） |
-| 2 | 输入框写内容 → 点 ⏰ | 浮层出现；内容预览为输入框草稿（无额外输入框） |
-| 3 | 选「今天」+ 已过时刻 | 提示"今天只能定当前时刻之后"，创建被拒 |
-| 4 | 选「今天」+ 未来时刻（或「明天」0–24） | 可创建；成功后输入框按勾选清空；任务秒级创建不卡"创建中" |
-| 5 | 同一会话创建 4 个待触发任务 | 第 4 个被拒（每会话最多 3 个） |
-| 6 | 设置 → 定时发送 | **面板内容可见（v0.7.0/v0.7.1 回归项）**；若仍异常应看到**错误信息而非空白**（SectionErrorBoundary）；按 待触发/已发送/失败/已撤回 分组；完成态默认折叠（点标题展开）；host 在线状态为绿 |
-| 6a | 输入区定时排队 | 创建 pending 任务后输入区上方出现「⏰ 定时排队」dock：**前置 HH:MM:SS 发送** + 剩余时间 + 预览 + 撤回；空则不显示 |
-| 7 | 点某任务「放大查看」 | 全文弹层可读 |
-| 8 | 点某任务「打开会话」 | 跳到该任务目标会话的对话列表（若报 `reading 'manager'` 说明用了旧 bundle，重启并确认版本） |
-| 9 | 「编辑内容」改后保存 | 列表文本更新（回归：v0.6.0 修复的 {id,text} 校验） |
-| 10 | 「撤回」后回列表 | 状态变 cancelled，不再发送 |
-| 11 | 到点验证 | 目标会话 QueueDock 出现该消息（若 agent 运行则排队等待消费） |
-| 12 | 重启 dsh 后未触发任务 | 仍 pending，到点自动补投（可查看 `jobs.json`） |
+| 1 | 打开 web UI | 侧栏有「定时任务」；**无**「自动化任务」；会话头部/回合卡不再出现官方日程标记 |
+| 2 | 「添加定时任务」 | 弹窗六要素齐全：名称/提示词/频率/有效期/工作区/通知；「允许完全访问」为展示文案 |
+| 3 | 频率逐种试 | 单次/每天/每周/固定间隔/Cron 各有非法值即时提示（cron 空、星期未选等） |
+| 4 | 选工作区创建 | 该工作区出现以任务名命名的新会话；列表行显示会话链接 |
+| 5 | 行操作 | 编辑（改频率生效）/ 立即执行（目标会话收到投递）/ 打开会话 / 删除（meta 同步清） |
+| 6 | 有效期 | 设一个近未来 `endsAt` → 到期后任务从官方列表消失、进入「已结束」折叠区 |
+| 7 | 输入框「⏰ 定时」 | 当前草稿建一次性任务；dock 行显示待触发预览 |
+| 8 | 通知联动 | 装 notify-alert ≥0.9.0 且渠道配好：任务执行完成后微信收到「定时任务完成/失败」推送（含任务名/耗时/结果摘要）；同轮**不再**重复发普通「回合结束」 |
+| 9 | 鉴权 | 未登录直接 `curl /api/scheduled-send/tasks` → 401 JSON；公网域名同样 |
+| 10 | 重启恢复 | 任务表与 meta 不丢；错过时刻由官方补投 |
 
-> 注（2026-10-13）：步骤 1 的"Vision Router 左侧"只是原始定位参照——Vision Router（上游
-> `dsh-vision-router`）**当前未装在本机 web profile**（`~/.dsh-dev/profiles/web/package.json` 无此依赖）。
-> 判据以"输入框工具行出现「⏰ 定时」"为准（插槽 `conversation.input.right`，order 0）。
+## 4. 已知盲区 / 说明
 
-## 3. 已知盲区 / 说明
+- **真实模型执行 + 微信送达**整链未在真机跑通（各段有单测与隔离 UI 证据；生产安装后按 §3.2 #8 人工验收）。
+- Client 交互（弹窗定位、明暗主题）依赖浏览器，由隔离 Playwright 与手工清单覆盖。
+- Windows 桌面版**未实测**：两端只共用源码，安装/重启路径不同（托盘退出重开）。
+- e2e 有意不调 `run`，避免向真实会话投递。
 
-- **真实定时触发**（等待到点投递、agent 消费、重启补投）无法在纯离线单测覆盖——依赖真实
-  `sessionController` 与 agent 循环，由手工清单 11/12 验收；host 端 `fire` 逻辑已由单测 mock 覆盖。
-- **Client UI 交互**（React 渲染、浮层定位、点击外部关闭）依赖浏览器，不在 Node 测试范围，
-  由手工清单 2–10 覆盖；`pnpm check` 保证 client 产物可构建、门禁可加载。
-- **每会话 3 个上限**在 host（add 强校验）与 client（预检）双层；单测覆盖 host 层，
-  手工清单 5 覆盖 UI 提示。
-- 端到端脚本只覆盖 API 面，不覆盖真实会话消息投递（有意避免污染用户会话）。
+## 5. 故障排查指引
 
-## 4. 故障排查指引
+- 单测红 → 先 `pnpm check` 全绿再谈安装。
+- e2e 401 → token 过期（重启换新）或未按 `--token` 传入；确认 `dsh-auth-*` cookie 已收集（脚本会打印）。
+- e2e 版本不匹配 → 服务加载旧 bundle：升版本重打 tgz、`plugin add`、重启、`pnpm verify:installed`。
+- 页面没有「定时任务」→ 看 profile 是否装了本包、`ui-schedule` 禁用是否误把 host `schedule` 条目也关了
+  （health 503 = 宿主服务缺失）。
+- 列表有任务但徽章不动 → `session/event` 未达（观察者异常会 console.warn，`journalctl --user -u dsh-dev-web` 查）。
 
-- 单测红 → 改代码后先 `pnpm check` 全绿再谈安装。
-- e2e 版本不匹配 → 服务加载的是旧 bundle：确认已装最新 tgz（升版本号重打包 + `plugin add`）
-  且已重启，运行 `pnpm verify:installed` 看安装目录版本。
-- e2e 连不上 → 先看设置 → 定时发送 的 host 在线状态；`journalctl --user -u dsh-dev-web` 查崩溃。
+## 6. 0.9.x 增量覆盖（2026-10-26）
+
+- **smoke-test 场景 5b/5c**：真实事件形状（`user/message` 直挂 `data`）执行链路回归；
+  `agentPreset` 创建绑定、`selectModel` 应用与失败即建失败、`model:null` 只清记录。
+- **verify-ui.cjs（隔离 3084）**：品牌移除（无「本地构建」）、收起按钮与新会话行
+  **垂直居中对齐且矩形不相交**、表单三字段（发送到/Agent 模式/执行模型）、建任成功、console 零报错。
+- **verify-rail.cjs（隔离 3084 + 生产 3082）**：折叠后轨道 `[data-dss-brand="mark"]` 可见
+  （父容器 class 含 `railMark`）、点「打开侧边栏」可恢复展开。
+- **生产验收**：真实定时任务执行 + 微信推送全链路（见 BRD §7）；截图证据
+  `ops/validation/dsh-scheduled-send-0.8.0/screenshots{,-prod}/`。

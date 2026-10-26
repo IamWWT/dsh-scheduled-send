@@ -1,16 +1,16 @@
-/**
- * dsh-scheduled-send — 双端共享常量。
- */
-
-/** 每个会话最多可同时存在的 pending（待触发）定时任务数（需求：最多 3 个）。 */
-export const MAX_PENDING_PER_SESSION = 3;
-
-/**
- * 最晚可定到的时间边界（天偏移，相对今天）：
- * 今天只可定"当前时刻之后"，明天可定 0–24 点。
- * 因此业务上最晚 = 明天 23:59:59（dayOffset 1 整天）。
- */
-export const MAX_SCHEDULE_DAY_OFFSET = 1;
+/** dsh-scheduled-send — 双端共享常量。 */
 
 /** 客户端请求超时（毫秒）：创建/列表等一律限时，绝不无限挂起。 */
-export const API_TIMEOUT_MS = 10000;
+export const API_TIMEOUT_MS = 15000;
+
+/** 列表轮询间隔（毫秒）。 */
+export const REFRESH_MS = 5000;
+
+/** 执行摘要最大字符数（通知与列表共用）。 */
+export const EXECUTION_SUMMARY_MAX = 240;
+
+/** 截止时间最远允许到当前时间之后多少天（防止误填进 30 年后的定时器）。 */
+export const MAX_VALIDITY_DAYS = 3650;
+
+/** 兼容旧版本导出（0.7.x 的每会话最多 3 个待触发限制已随官方 Schedule 废弃）。 */
+export const MAX_PENDING_PER_SESSION = 3;
