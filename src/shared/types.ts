@@ -18,6 +18,17 @@ export type Frequency =
   | { kind: "weekly"; time: string; timeZone: string; weekdays: number[] }
   | { kind: "cron"; expression: string; timeZone: string };
 
+/**
+ * 一次性任务（只触发一次）：`once`（绝对时刻）/ `after`（延迟一次）。
+ * 其余 `every`/`daily`/`weekly`/`cron` 都是周期任务。
+ *
+ * 用途：会话输入框 dock 只展示一次性任务；周期任务是长期背景调度，
+ * 常驻在会话输入框上方会让会话越开越乱（2026-10-26 用户要求）。
+ */
+export function isOneShotFrequency(frequency: Frequency): boolean {
+  return frequency.kind === "once" || frequency.kind === "after";
+}
+
 /** 官方任务最近一次收件箱投递回执（不等于模型执行结果）。 */
 export interface DeliveryReceipt {
   scheduledAt: string;
@@ -72,6 +83,8 @@ export interface TaskView {
   agentPreset?: string;
   /** 插件元数据：任务绑定的模型（应用时刻 = 创建/更新时对目标会话 selectModel）。 */
   model?: ModelRef;
+  /** 插件元数据：预置任务（由集成方/脚本创建，页面「预置任务」tab 分组展示）。 */
+  builtin?: boolean;
   /** 插件记录的创建时刻（epoch ms）。 */
   createdAt: number;
   lastDelivery?: DeliveryReceipt;
@@ -94,6 +107,8 @@ export interface TaskCreateRequest {
   agentPreset?: string;
   /** 对目标会话应用的模型；缺省 = 不指定（新会话用全局默认，现有会话跟随现状）。 */
   model?: ModelRef;
+  /** 标记为插件预置任务（页面「预置任务」tab）；缺省 = 用户自定义。 */
+  builtin?: boolean;
 }
 
 /** 更新任务请求；所有字段可选，省略保留原值。 */
@@ -107,6 +122,8 @@ export interface TaskUpdateRequest {
   notify?: boolean;
   /** 重新应用模型到绑定会话；null = 仅清插件记录（不回滚会话模型）。 */
   model?: ModelRef | null;
+  /** 切换「预置 / 用户自定义」归属。 */
+  builtin?: boolean;
 }
 
 /** 删除请求。 */

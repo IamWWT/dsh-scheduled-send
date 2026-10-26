@@ -1,6 +1,6 @@
 {
   "name": "dsh-scheduled-send",
-  "version": "0.9.5",
+  "version": "0.10.2",
   "description": "DSH 定时任务：复用官方 Schedule 服务，提供 WorkBuddy 式提示词定时表单、任务会话、截止时间与执行状态；通知联动 dsh-notify-alert。",
   "keywords": [
     "dsh",

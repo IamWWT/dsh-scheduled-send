@@ -263,6 +263,7 @@ export class ScheduleBridge {
       ...(endsAt === undefined ? {} : { endsAt }),
       ...(input.agentPreset === undefined || input.agentPreset === "" ? {} : { agentPreset: input.agentPreset }),
       ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.builtin === true ? { builtin: true } : {}),
     });
     await this.refresh();
     const entry = this.catalogCache.find(x => x.id === record.id);
@@ -305,6 +306,10 @@ export class ScheduleBridge {
       if (input.endsAt === null) delete currentMeta.endsAt;
     }
     if (input.notify !== undefined) currentMeta.notify = input.notify;
+    if (input.builtin !== undefined) {
+      if (input.builtin) currentMeta.builtin = true;
+      else delete currentMeta.builtin;
+    }
     if (input.model !== undefined) {
       if (input.model === null) delete currentMeta.model;
       else {
@@ -438,6 +443,7 @@ export class ScheduleBridge {
       notify: meta.notify,
       ...(meta.agentPreset === undefined ? {} : { agentPreset: meta.agentPreset }),
       ...(meta.model === undefined ? {} : { model: meta.model }),
+      ...(meta.builtin === true ? { builtin: true } : {}),
       createdAt: meta.createdAt,
       ...(entry.lastDelivery === undefined ? {} : { lastDelivery: receiptOf(entry.lastDelivery) }),
       ...(meta.lastExecution === undefined ? {} : { lastExecution: meta.lastExecution }),

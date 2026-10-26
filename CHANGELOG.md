@@ -1,3 +1,38 @@
+## 0.10.2 — 2026-10-26 官方壳层 UI 移交 dsh-ui-shell
+
+用户要求：把「改官方 UI」的那部分从本插件摘出去，集中到一个 UI 插件管理。
+
+- 移除 `sidebar.brand.name` / `sidebar.brand.mark` 两处注册与 `BrandHidden` / `BrandShift` 组件、
+  `.dss-logo-shift` / `[data-dss-brand]` 样式：品牌区隐藏与「收起侧栏」按钮落位改由
+  **`dsh-ui-shell` 0.1.0** 接管（同一 single 插槽只应有一个占位者，避免多插件抢注）。
+- 本插件此后只注册自己的业务插槽：`sidebar.panellist`（定时任务页）、`main`、
+  `conversation.input.right`（⏰ 定时）、`conversation.input.dock`（一次性任务 dock）、
+  `settings.section`。
+- 行为不变：外观与 0.10.1 一致，差异只在归属。
+
+## 0.10.1 — 2026-10-26 输入框 dock 只展示一次性任务
+
+用户反馈（生产）：新开一个对话框，顶部的「定时任务（1）」就跟着出现（月报任务），
+周期任务常驻会话输入框上方，任务一多后续会话就乱。
+
+- 根因：dock 过滤只按 `sessionId + status=active`，不看频率；月报任务的投递会话恰好是
+  用户新开的那个会话，于是周期任务被渲染出来。
+- 新增共享判定 `isOneShotFrequency()`（`once` / `after` 为一次性；`every`/`daily`/`weekly`/`cron`
+  为周期）；dock 过滤改为 `sessionId + active + 一次性`，周期任务不再进入 dock，统一在
+  「定时任务」页管理。
+- 回归：`test/ui-hooks-regression-test.mjs` 补 dock 用例（同一会话下周期任务不渲染、
+  一次性任务渲染）——不靠人工看图。
+
+## 0.10.0 — 2026-10-26 预置任务 / 自定义任务分组
+
+用户需求：页面区分「插件默认定时任务」（如工作台四报：日报/周报/月报/年报）与用户自建任务，
+tab 切换展示。
+
+- 元数据/契约新增 `builtin` 标记：`TaskCreateRequest.builtin`（脚本/集成方创建时声明；
+  UI 新建恒为用户任务）、`TaskUpdateRequest.builtin`（切换归属）、`TaskView.builtin`（列表透出）。
+- 任务页头部新增 tab：「自定义任务（n）/ 预置任务（n）」；统计徽章、待执行/已结束分组、
+  清理已结束均作用于当前 tab；预置 tab 空态给出 builtin=true 创建口径说明。
+
 ## 0.9.5 — 2026-10-26 收起按钮与新会话按钮并排（不重叠）
 
 用户反馈（生产）：收起按钮叠在「新会话」按钮右端，两个框重叠难看。

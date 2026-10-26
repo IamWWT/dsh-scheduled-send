@@ -5,11 +5,11 @@ DSH 定时任务插件：给**提示词**设定发送计划（单次 / 每天 / 
 本插件不重写调度，只补官方没有的四件事——**管理表单、有效期、执行状态观察、通知联动**，
 并让「定时任务」页取代官方「自动化任务」入口。
 
-现行版本 **0.9.5**；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+现行版本 **0.10.2**；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 效果预览
 
-侧栏「定时任务」入口（品牌区已移除，收起按钮并入「新会话」行）：
+侧栏「定时任务」入口（官方品牌区与收起按钮落位自 0.10.2 起由 `dsh-ui-shell` 集中接管）：
 
 ![侧栏入口](docs/images/sidebar.png)
 
@@ -25,12 +25,13 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
 
 **入口与管理**
 
-- 侧栏「定时任务」独立页：待执行/已结束分组、统计徽章（下次执行、host 与官方 Schedule 状态）、
-  一键清理已结束任务（`deleteInactive`）。
+- 侧栏「定时任务」独立页：**自定义任务 / 预置任务 tab 切换**（预置 = 插件或脚本以
+  `builtin=true` 创建的默认任务，如工作台四报）、待执行/已结束分组、统计徽章（下次执行、
+  host 与官方 Schedule 状态）、一键清理已结束任务（`deleteInactive`）。
 - 创建/编辑弹窗字段：任务名称、提示词、频率（单次/每天/每周/固定间隔/Cron，时区默认本地）、
   有效期（长期有效 / 截止时刻）、**发送到**（新建任务会话 ⟂ 现有会话）、**Agent 模式**（preset，
   仅新会话可选——现有会话首轮后锁定，只读展示）、**执行模型**、执行完成推送开关。
-- 聊天输入框工具行「⏰ 定时」：把当前草稿一键排成一次性任务；输入框上方 dock 展示本会话待执行任务。
+- 聊天输入框工具行「⏰ 定时」：把当前草稿一键排成一次性任务；输入框上方 dock **只展示本会话的一次性（未触发/未投递完成）任务**——周期任务（每天/每周/间隔/Cron）常驻 dock 会让会话越开越乱，一律只在左侧「定时任务」页查看与编辑。
 - 每行操作：编辑 / 立即执行（官方 `runNow` 投递）/ 打开会话 / 删除；展示最近执行结果与投递回执。
 
 **调度与投递（全部复用官方）**
@@ -85,11 +86,11 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
 一律 **tgz 安装**（不用 link）；与 dsh-notify-alert ≥0.9.0 同装才有执行状态推送：
 
 ```bash
-pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.9.5.tgz
+pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.10.2.tgz
 
 # Ubuntu 源码版（CLI 不在 PATH；脚本默认 DSH_HOME=~/.dsh-dev、profile=web）
 DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
-  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.9.5.tgz --apply
+  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.2.tgz --apply
 
 # Windows 桌面版
 "<安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add <tgz 绝对路径>

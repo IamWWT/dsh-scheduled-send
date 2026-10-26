@@ -126,3 +126,51 @@ assert.ok(window.document.body.textContent.includes("测试任务"), "任务行�
 try { root.unmount(); } catch { /* 忽略 */ }
 
 console.log("✔ TaskPage hooks 稳定性回归通过（空→有两次渲染，无 #310）");
+
+// ── 0.10.1：输入框 dock 只展示一次性任务（周期任务常驻 dock 会让会话越开越乱） ──
+// 每次挂载一个全新 root：ScheduledDock 的 useEffect 依赖 [sessionId]，同 root 重渲染不会重新拉取。
+async function mountDock(tasks) {
+  currentTasks = tasks;
+  const host = window.document.createElement("div");
+  window.document.body.appendChild(host);
+  const dockRoot = createRoot(host);
+  await act(async () => {
+    dockRoot.render(createElement(ui.ScheduledDock, { sessionId: "sess-dock" }));
+    await new Promise(r => setTimeout(r, 50));
+  });
+  return { host, dockRoot };
+}
+
+const periodicTask = {
+  ...task,
+  id: "schedule-periodic",
+  title: "月报-月度总结",
+  sessionId: "sess-dock",
+  frequency: { kind: "cron", expression: "0 18 30 * *", timeZone: "Asia/Shanghai" },
+};
+const onceTask = {
+  ...task,
+  id: "schedule-once",
+  title: "一次性提醒",
+  sessionId: "sess-dock",
+  frequency: { kind: "once", at: new Date(Date.now() + 600_000).toISOString() },
+};
+
+{
+  const { host, dockRoot } = await mountDock([periodicTask]);
+  assert.equal(host.querySelector("[data-scheduled-dock]"), null,
+    "周期任务（cron）不得渲染到输入框 dock");
+  assert.ok(!host.textContent.includes("月报-月度总结"), "周期任务标题不得出现在 dock");
+  try { dockRoot.unmount(); } catch { /* 忽略 */ }
+}
+
+{
+  const { host, dockRoot } = await mountDock([periodicTask, onceTask]);
+  const dock = host.querySelector("[data-scheduled-dock]");
+  assert.ok(dock !== null, "一次性任务（once）应渲染到输入框 dock");
+  assert.ok(dock.textContent.includes("一次性提醒"), "dock 应展示一次性任务标题");
+  assert.ok(!dock.textContent.includes("月报-月度总结"), "dock 不得混入周期任务");
+  try { dockRoot.unmount(); } catch { /* 忽略 */ }
+}
+
+console.log("✔ 输入框 dock 过滤回归通过（一次性上 dock / 周期任务不上 dock）");

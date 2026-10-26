@@ -5,6 +5,7 @@
  * 任务列表与输入区快捷入口。页面/表单/列表全部使用 DSH 主题 token。
  */
 import type { Frequency, TaskView } from "../shared/types.ts";
+import { isOneShotFrequency } from "../shared/types.ts";
 import { API_TIMEOUT_MS, REFRESH_MS } from "../shared/constants.ts";
 import { sessionMetaOf, type SessionMetaRow } from "../shared/session-meta.ts";
 
@@ -272,15 +273,7 @@ const CSS = `
 .dss-modal-title{font-size:16px;font-weight:650}
 .dss-x{margin-left:auto;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:6px}
 .dss-x:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-/* 侧栏品牌区移除后（dss-logo-shift 由 BrandShift 挂载时打在 logoRow 上）：
-   顶行压扁；新会话按钮让出右端 40px，官方收起按钮绝对定位落进这块空档
-   （top 100% + 行距 4 + (38-28)/2 = 9，与按钮垂直居中对齐，互不重叠）。 */
-.dss-logo-shift{position:relative;height:14px!important;padding:0!important;margin-bottom:4px!important;overflow:visible!important}
-.dss-logo-shift + button{margin-right:40px!important}
-.dss-logo-shift>button:last-of-type:not(:has([data-dss-brand])){position:absolute;top:calc(100% + 9px);right:0;z-index:5}
-/* 品牌 mark 插槽双用途：展开态品牌区隐藏；折叠轨道（railMark）内显示为展开标识。 */
-[data-dss-brand="mark"]{display:none}
-[class*="railMark"] [data-dss-brand="mark"]{display:block;color:var(--dsw-alias-label-secondary)}
+
 .dss-bchip{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 9px;border-radius:8px;border:0.5px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1;cursor:pointer;user-select:none;white-space:nowrap;font-family:inherit}
 .dss-bchip:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dss-bchip.on{color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover-accent)}
@@ -318,57 +311,6 @@ export function makeUI(React: unknown, _ctx: Ctx) {
   const { useState, useEffect, useRef } = R;
   const h = R.createElement;
   styleOnce();
-
-  /**
-   * 移除官方侧栏品牌区：注册进 `sidebar.brand.name` / `sidebar.brand.mark`（single 插槽，
-   * 替换「本地构建+版本徽标」回退为空实现，整块不再占纵向空间）。
-   * 外层品牌按钮（点击=新会话）由官方容器保留，但侧栏本就有「新会话」按钮，功能不损失。
-   */
-  /**
-   * `sidebar.brand.mark` 同时被两处复用：展开态品牌区（要隐藏）与折叠轨道里
-   * 展开按钮的 railMark（要保留可见标识）。这里统一渲染一个面板图标，
-   * 由 CSS 控制：默认不显示，仅 railMark 容器内显示（见 [data-dss-brand="mark"] 规则）。
-   */
-  const BrandHidden: (p?: { size?: number }) => unknown = (p) =>
-    h("svg", {
-      "data-dss-brand": "mark",
-      width: p?.size ?? 20,
-      height: p?.size ?? 20,
-      viewBox: "0 0 24 24",
-      fill: "none",
-      "aria-hidden": "true",
-    },
-      h("rect", { x: 3, y: 4, width: 18, height: 16, rx: 3, stroke: "currentColor", strokeWidth: 1.8 }),
-      h("path", { d: "M9.5 4v16", stroke: "currentColor", strokeWidth: 1.8 }),
-    );
-
-  /**
-   * 品牌区移除后，把顶行（logoRow）压扁，并将官方「收起侧栏」按钮叠到「新会话」行右端。
-   * 官方没有该按钮或新会话行的插槽，这里只借品牌插槽的挂载生命周期打一个标记类，
-   * 纯 CSS 完成移位（DOM 移动会被宿主折叠动画的重渲染吞掉）。
-   * 定位锚点：品牌 span 所在 logoRow（div[data-window-drag]）；行内最后一个按钮且不含
-   * 品牌 span 的即收起按钮（macOS 顶栏布局下收起按钮不在本行 → 找不到，不移位）。
-   */
-  const BrandShift: () => unknown = () => {
-    const ref = useRef<HTMLElement | null>(null);
-    useEffect(() => {
-      const span = ref.current ?? document.querySelector<HTMLElement>("[data-dss-brand=name]");
-      if (span === null || span === undefined) return;
-      const row = span.closest("div[data-window-drag]");
-      if (row === null) return;
-      let toggle: Element | null = null;
-      try {
-        toggle = row.querySelector("button:last-of-type:not(:has([data-dss-brand]))");
-      } catch {
-        // 不支持 :has 的宿主浏览器：不移位，仅隐藏品牌。
-        return;
-      }
-      if (toggle === null) return;
-      row.classList.add("dss-logo-shift");
-      return () => { row.classList.remove("dss-logo-shift"); };
-    }, []);
-    return h("span", { "data-dss-brand": "name", ref, "aria-hidden": "true", style: { display: "none" } });
-  };
 
   const PanelIcon: (p: { size?: number; active?: boolean }) => unknown = (p) => {
     const size = p.size ?? 16;
@@ -744,6 +686,7 @@ export function makeUI(React: unknown, _ctx: Ctx) {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [modal, setModal] = useState<{ task: TaskView | null } | null>(null);
     const [showEnded, setShowEnded] = useState(false);
+    const [tab, setTab] = useState<"custom" | "builtin">("custom");
 
     const refresh = (): void => {
       void fetchTasks().then(
@@ -760,9 +703,19 @@ export function makeUI(React: unknown, _ctx: Ctx) {
     }, []);
 
     const workspaceRows = p.getWorkspaces?.() ?? p.workspaces ?? [];
-    const active = tasks.filter(t => t.status === "active").sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
-    const ended = tasks.filter(t => t.status !== "active");
+    const custom = tasks.filter(t => t.builtin !== true);
+    const builtins = tasks.filter(t => t.builtin === true);
+    const visible = tab === "builtin" ? builtins : custom;
+    const active = visible.filter(t => t.status === "active").sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
+    const ended = visible.filter(t => t.status !== "active");
     const next = active[0];
+    const tabButton = (k: "custom" | "builtin", label: string, n: number) =>
+      h("button", {
+        key: k, type: "button",
+        className: "dss-btn-ghost" + (tab === k ? " dss-day-on" : ""),
+        style: tab === k ? { color: "var(--dsw-alias-brand-primary)", borderColor: "var(--dsw-alias-brand-primary)" } : undefined,
+        onClick: () => setTab(k),
+      }, `${label}（${n}）`);
 
     return h("div", { className: "dss-page" + (p.embedded ? " dss-embedded" : "") },
       h("div", { className: "dss-top" },
@@ -781,6 +734,9 @@ export function makeUI(React: unknown, _ctx: Ctx) {
                 },
               }, "清理已结束")
             : null)),
+      h("div", { className: "dss-inline", style: { gap: 6 } },
+        tabButton("custom", "自定义任务", custom.length),
+        tabButton("builtin", "预置任务", builtins.length)),
       h("div", { className: "dss-summary" },
         h("span", { className: "dss-stat" }, "待执行 ", h("b", null, String(active.length))),
         h("span", { className: "dss-stat" }, "已结束 ", h("b", null, String(ended.length))),
@@ -797,7 +753,7 @@ export function makeUI(React: unknown, _ctx: Ctx) {
         : null,
       h("div", { className: "dss-list" },
         active.length === 0 && !loading
-          ? h("div", { className: "dss-empty" }, "还没有待执行任务。点右上角「＋ 添加定时任务」，或直接在输入框写好提示词后点「⏰ 定时」。")
+          ? h("div", { className: "dss-empty" }, tab === "builtin" ? "没有预置任务。预置任务由插件/脚本以 builtin=true 创建（如工作台四报）。" : "还没有待执行任务。点右上角「＋ 添加定时任务」，或直接在输入框写好提示词后点「⏰ 定时」。")
           : active.map(t => h(TaskRow, {
               key: t.id,
               task: t,
@@ -975,8 +931,11 @@ export function makeUI(React: unknown, _ctx: Ctx) {
       return () => window.clearInterval(timer);
     }, [sessionId]);
 
+    // 只展示**一次性**任务：周期任务（daily/weekly/cron/every）是长期背景调度，
+    // 常驻在输入框上方会让会话越开越乱（2026-10-26 用户要求）；周期任务统一在
+    // 左侧「定时任务」页查看与编辑。
     const mine = tasks
-      .filter(t => t.sessionId === sessionId && t.status === "active")
+      .filter(t => t.sessionId === sessionId && t.status === "active" && isOneShotFrequency(t.frequency))
       .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))
       .slice(0, 4);
     if (mine.length === 0) return null;
@@ -990,7 +949,7 @@ export function makeUI(React: unknown, _ctx: Ctx) {
           h("span", { className: "dss-dock-eta" }, countdown(t.scheduledAt))))));
   };
 
-  return { TaskPage, SettingsSection, InputBadge, ScheduledDock, PanelIcon, BrandHidden, BrandShift };
+  return { TaskPage, SettingsSection, InputBadge, ScheduledDock, PanelIcon };
 }
 
 function bodyPreview(draft: string, h: H): unknown {

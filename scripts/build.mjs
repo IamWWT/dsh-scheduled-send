@@ -124,8 +124,8 @@ async function verifyArtifacts() {
   if (!clientSrc.includes("conversation.input.dock")) fail("lib/client.js 未注册 conversation.input.dock 插槽（定时排队）");
   if (!clientSrc.includes("settings.section")) fail("lib/client.js 未注册 settings.section 插槽");
   if (!clientSrc.includes("sidebar.panellist")) fail("lib/client.js 未注册 sidebar.panellist 插槽（左侧定时任务入口）");
-  if (!clientSrc.includes("sidebar.brand.name")) fail("lib/client.js 未注册 sidebar.brand.name（品牌区隐藏）");
-  if (!clientSrc.includes("sidebar.brand.mark")) fail("lib/client.js 未注册 sidebar.brand.mark（品牌区隐藏）");
+  // 0.10.2 起不再注册 sidebar.brand.*（官方壳层 UI 移交 dsh-ui-shell）：回归门禁反向断言。
+  if (clientSrc.includes("sidebar.brand.")) fail("lib/client.js 仍在注册 sidebar.brand.*（壳层 UI 应归 dsh-ui-shell）");
   if (!clientSrc.includes('key: "scheduled-send"') && !clientSrc.includes("key:\"scheduled-send\"")) {
     fail("lib/client.js 未注册 main 页面 key=scheduled-send");
   }

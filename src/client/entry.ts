@@ -199,20 +199,9 @@ window.__ModuleLoader__?.load({
             ui.PanelIcon,
           ));
 
-        // 移除官方品牌区（logo + 两行「本地构建/版本徽标」→ 空实现，整块不再占空间），
-        // 并把「收起侧栏」按钮移位到「新会话」行右端（BrandShift 的挂载 effect 打标记类）。
-        // single 插槽同优先级重复注册会抛错：桌面版若装了 ui-brand-official，让位并保持静默降级。
-        const hideBrand = (slotName: string, component: () => unknown) => {
-          slots.inject(slotName, () => {
-            try {
-              slots.register({ name: slotName }, component);
-            } catch (e) {
-              console.info(`[scheduled-send] ${slotName} 已有占位者，跳过隐藏：`, String((e as Error)?.message ?? e));
-            }
-          });
-        };
-        hideBrand("sidebar.brand.name", ui.BrandShift);
-        hideBrand("sidebar.brand.mark", ui.BrandHidden);
+        // 官方壳层 UI（品牌区隐藏、收起按钮落位）自 0.10.2 起由 dsh-ui-shell 集中接管，
+        // 本插件不再注册 sidebar.brand.* 插槽：一处改官方 UI，避免多个插件抢同一个 single 插槽。
+
 
         // 输入框工具行「⏰ 定时」：快速把当前草稿排成一次性任务。
         slots.inject("conversation.input.right", () =>
@@ -226,7 +215,7 @@ window.__ModuleLoader__?.load({
             ui.InputBadge,
           ));
 
-        // 当前会话待执行任务 dock。
+        // 当前会话的**一次性**任务 dock（周期任务不上 dock，见 ui.ScheduledDock 过滤）。
         slots.inject("conversation.input.dock", () =>
           slots.register(
             {

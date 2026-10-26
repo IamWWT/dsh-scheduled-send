@@ -25,6 +25,8 @@ export interface TaskMeta {
   agentPreset?: string;
   /** 任务绑定的模型（创建/更新时已对目标会话执行 selectModel）。 */
   model?: ModelRef;
+  /** 插件预置任务（页面「预置任务」tab 分组）。 */
+  builtin?: boolean;
   createdAt: number;
   lastExecution?: ExecutionRecord;
 }
@@ -60,6 +62,7 @@ export class MetaStore {
           ...(typeof v.title === "string" && v.title !== "" ? { title: v.title } : {}),
           ...(typeof v.agentPreset === "string" && v.agentPreset !== "" ? { agentPreset: v.agentPreset } : {}),
           ...(isModelRef(v.model) ? { model: v.model } : {}),
+          ...(v.builtin === true ? { builtin: true } : {}),
           createdAt: typeof v.createdAt === "number" && Number.isFinite(v.createdAt) ? v.createdAt : Date.now(),
           ...(isExecutionRecord(v.lastExecution) ? { lastExecution: v.lastExecution } : {}),
         };
@@ -99,6 +102,7 @@ export class MetaStore {
       ...(defaults.title === undefined ? {} : { title: defaults.title }),
       ...(defaults.agentPreset === undefined ? {} : { agentPreset: defaults.agentPreset }),
       ...(defaults.model === undefined ? {} : { model: defaults.model }),
+      ...(defaults.builtin !== true ? {} : { builtin: true }),
     };
     this.data.tasks[id] = created;
     return created;
