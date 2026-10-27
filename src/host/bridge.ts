@@ -121,8 +121,18 @@ interface HostSessionLike {
   header?: { title?: string; cwd?: string };
 }
 
+/** 工作区实体里本插件用到的那两个成员（`@deepseek-ai/dsh-workspace` 公开面）。 */
+interface WorkspaceEntityLike {
+  attachSession(sessionId: SessionId): Promise<void>;
+  detachSession(sessionId: SessionId): Promise<void>;
+}
+
 interface BridgeCtx {
-  workspaceRegistry?: { list(): Array<{id: string; path: string; sessionIds: readonly string[]}>; readonly archivedSessionIds: readonly string[] };
+  workspaceRegistry?: {
+    list(): Array<{id: string; path: string; sessionIds: readonly string[]}>;
+    get?: (id: WorkspaceId) => WorkspaceEntityLike | undefined;
+    readonly archivedSessionIds: readonly string[];
+  };
   schedule: ScheduleServiceLike;
   sessionController: SessionControllerLike;
   sessions?: { get?: (id: SessionId) => HostSessionLike | undefined };
@@ -164,6 +174,8 @@ export class ScheduleBridge {
   private readonly disposers: Array<() => void> = [];
   private refreshChain: Promise<void> = Promise.resolve();
   private stopped = false;
+  /** 0.10.7 一次性迁移：把历史遗留的「空白任务会话」退出工作区列表。 */
+  private stubSeatsReleased = false;
 
   constructor(ctx: unknown, stateDir: string, version: string) {
     this.ctx = ctx as BridgeCtx;
@@ -262,6 +274,12 @@ export class ScheduleBridge {
       }
     }
     if (changed) this.meta.flush();
+    if (!this.stubSeatsReleased) {
+      // 宿主启动时的 workspace bootstrap 会把「按 cwd 归属但不在名单里」的会话重新挂回工作区，
+      // 所以迁移必须在 bootstrap 之后（本插件 inject 了 workspaceRegistry，apply 晚于它 init）跑一次。
+      this.stubSeatsReleased = true;
+      await this.releaseStubSeats(entries);
+    }
     this.protection.capture(entries.map(entry=>{
       const view=this.toView(entry),workspaceId=this.workspaceFor(view);
       return {...view,...(workspaceId?{workspaceId}:{})};
@@ -537,11 +555,71 @@ export class ScheduleBridge {
     } catch (e) {
       this.ctx.logger?.warn?.(`[dsh-scheduled-send] 任务会话命名失败（不影响调度）：${String((e as Error)?.message ?? e)}`);
     }
+    // 建完就命名、却没有一轮对话 ⇒ 这是宿主的「空白会话」。必须立刻退出工作区成员席位，
+    // 否则它会被 web 端「新会话」当成可复用空白会话抢走（详见 releaseSeat 注释）。
+    await this.releaseSeat(created.sessionId, input.workspaceId);
     return {
       sessionId: created.sessionId,
       workspaceId: input.workspaceId,
       sessionTitle: title,
     };
+  }
+
+  /**
+   * 让任务会话退出工作区成员席位（工作区列表里不再出现，web「新会话」也不再选中它）。
+   *
+   * 为什么必须这么做（2026-10-28 生产实证）：宿主 web 的「新会话」会把该工作区
+   * **第一个空白会话**交给 `session.create` 复用 —— 见 deepseek-harness
+   * `packages/client/ui-workspace/src/client/navigation.ts:243`（`createInWorkspace`）
+   * 与 `packages/api/session-controller/src/agent.ts:399`（`reuseLive`：`isBlank` 即可复用）。
+   * 插件为任务新建的会话恰好同时满足「成员 + 没有 turn/start」，又已被 rename 钉住标题
+   * ⇒ 用户每点一次「新会话」，拿到的是叫「月报-月度总结」的任务会话。
+   * 空白度是宿主内部状态，插件无法清除；能动的只有成员席位，所以退席。
+   */
+  private async releaseSeat(sessionId: SessionId, workspaceId?: string): Promise<void> {
+    const registry = this.ctx.workspaceRegistry;
+    if (registry?.get === undefined || workspaceId === undefined || workspaceId === "") return;
+    const workspace = registry.get(workspaceId as WorkspaceId);
+    if (workspace === undefined) return;
+    try {
+      await workspace.detachSession(sessionId);
+    } catch (e) {
+      this.ctx.logger?.warn?.(`[dsh-scheduled-send] 任务会话退出工作区列表失败（不影响调度）：${String((e as Error)?.message ?? e)}`);
+    }
+  }
+
+  /**
+   * 任务会话被真正使用过之后挂回工作区：此时它已有真实轮次（不再空白），
+   * 不可能被「新会话」复用，用户也能像以前一样在列表里点开看历史。
+   */
+  private async reclaimSeat(sessionId: SessionId, taskId: string): Promise<void> {
+    const registry = this.ctx.workspaceRegistry;
+    if (registry?.get === undefined) return;
+    const entry = this.catalogCache.find(x => x.id === taskId);
+    if (entry === undefined || entry.sessionId !== sessionId) return;
+    const workspaceId = this.workspaceFor(this.toView(entry));
+    if (workspaceId === undefined) return;
+    const workspace = registry.get(workspaceId as WorkspaceId);
+    if (workspace === undefined) return;
+    try {
+      await workspace.attachSession(sessionId);
+    } catch (e) {
+      this.ctx.logger?.warn?.(`[dsh-scheduled-send] 任务会话挂回工作区失败（不影响调度）：${String((e as Error)?.message ?? e)}`);
+    }
+  }
+
+  /**
+   * 一次性迁移（0.10.7）：旧版本建的任务会话仍是工作区里的空白成员，继续会被
+   * 「新会话」抢走。只处理「插件建过（meta 有 sessionTitle）且从未投递过」的会话；
+   * 已投递的会话有真实轮次，既不会被复用，也不该被摘掉。
+   */
+  private async releaseStubSeats(entries: readonly ScheduleCatalogEntryLike[]): Promise<void> {
+    for (const entry of entries) {
+      const meta = this.meta.get(entry.id);
+      if (meta?.sessionTitle === undefined) continue;
+      if (entry.lastDelivery !== undefined || meta.lastExecution !== undefined) continue;
+      await this.releaseSeat(entry.sessionId, this.workspaceFor(this.toView(entry)));
+    }
   }
 
   /** 对目标会话应用模型；官方语义 = 同时更新全局默认模型（与手动切换一致）。失败即抛出，不建半坏任务。 */
@@ -641,6 +719,11 @@ export class ScheduleBridge {
         this.currentTurn.set(sessionId, turn);
         this.turnStartedAt.set(sessionId, Date.now());
         this.lastAssistantText.delete(sessionId);
+      }
+      // 会话已经有了真实轮次 ⇒ 不再是「空白会话」，可以挂回工作区（见 releaseSeat）。
+      // 只在这一步挂回，避免「投递已排队但 turn 还没开始」的空窗期把它重新变成可复用空白会话。
+      for (const entry of this.catalogCache) {
+        if (entry.sessionId === sessionId) void this.reclaimSeat(sessionId, entry.id);
       }
       return;
     }

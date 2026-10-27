@@ -109,6 +109,27 @@ const ctx = {
 };
 const sessionEventHandlers = [];
 
+/**
+ * 工作区注册表 mock（0.10.7 起 bridge 用它把任务会话退出/挂回成员席位）。
+ * `list()` 只报 ws-1；`get()` 返回带 attachSession/detachSession 的工作区实体。
+ */
+const workspaceCalls = [];
+const attached = new Set();
+const workspaceRegistry = {
+  archivedSessionIds: [],
+  list() {
+    return [{ id: "ws-1", path: "/tmp/ws-1", sessionIds: [...attached] }];
+  },
+  get(id) {
+    if (id !== "ws-1") return undefined;
+    return {
+      async attachSession(sessionId) { attached.add(sessionId); workspaceCalls.push({ op: "attach", sessionId }); },
+      async detachSession(sessionId) { attached.delete(sessionId); workspaceCalls.push({ op: "detach", sessionId }); },
+    };
+  },
+};
+ctx.workspaceRegistry = workspaceRegistry;
+
 const bridge = new Bridge(ctx, stateDir, "test");
 bridge.start();
 
@@ -128,6 +149,13 @@ assert.equal(task.status, "active");
 assert.equal(task.frequency.kind, "every");
 assert.equal(task.frequency.seconds, 3600);
 assert.ok(task.endsAt > Date.now(), "应保存截止时间");
+// 0.10.7：新建的任务会话必须立刻退出工作区成员席位，否则会被 web「新会话」当成可复用空白会话抢走
+assert.deepEqual(
+  workspaceCalls.filter(c => c.op === "detach").map(c => c.sessionId).slice(0, 1),
+  [createdSessions[0].sessionId],
+  "任务会话建好即退席（detachSession）",
+);
+assert.equal(attached.has(createdSessions[0].sessionId), false, "退席后不应仍算工作区成员");
 
 // 2) 列表
 let list = await bridge.list();
@@ -186,6 +214,14 @@ assert.ok(executionUpdates[0].taskIds.includes(task.id));
 list = await bridge.list();
 assert.equal(list.find(t => t.id === task.id)?.lastExecution?.status, "success", "lastExecution 应写回 meta");
 
+// 5b2) 0.10.7：任务会话出现真实轮次（turn/start）后要挂回工作区——那一刻已不空白，不会被复用
+await new Promise(r => setTimeout(r, 50));
+assert.equal(attached.has(task.sessionId), true, "有真实轮次的任务会话应挂回工作区");
+assert.ok(
+  workspaceCalls.some(c => c.op === "attach" && c.sessionId === task.sessionId),
+  "投递后的任务会话应走 attachSession",
+);
+
 // 5c) preset + 模型：新会话带 agentPreset 创建；selectModel 应用到绑定会话
 const withModel = await bridge.create({
   title: "带模型任务",
@@ -231,6 +267,39 @@ await bridge.update({ id: expiring.id, endsAt: Date.now() + 50 });
 await new Promise(r => setTimeout(r, 120));
 list = await bridge.list();
 assert.equal(list.some(t => t.id === expiring.id), false, "到期任务应被删除");
+
+// 9) 0.10.7 启动迁移：旧版本留下的「空白任务会话」重启后也要退出工作区；
+//    已投递过的会话不动（它有真实轮次，不会被「新会话」复用）
+const legacy = await bridge.create({
+  title: "历史空白任务",
+  prompt: "x",
+  workspaceId: "ws-1",
+  frequency: { kind: "cron", expression: "0 18 30 * *", timeZone: "Asia/Shanghai" },
+});
+const legacyDelivered = await bridge.create({
+  title: "历史已投递任务",
+  prompt: "y",
+  workspaceId: "ws-1",
+  frequency: { kind: "cron", expression: "0 18 30 * *", timeZone: "Asia/Shanghai" },
+});
+// 模拟宿主 bootstrap 把两者按 cwd 重新挂回工作区（重启后必然发生）
+attached.add(legacy.sessionId);
+attached.add(legacyDelivered.sessionId);
+const deliveredEntry = schedule.entries.find(e => e.sessionId === legacyDelivered.sessionId);
+deliveredEntry.lastDelivery = { scheduledAt: new Date().toISOString(), deliveredAt: new Date().toISOString(), messageId: "msg-legacy" };
+bridge.stop();
+
+const callsBeforeRestart = workspaceCalls.length;
+const restarted = new Bridge(ctx, stateDir, "test");
+restarted.start();
+await restarted.list();
+const detachAfterRestart = workspaceCalls.slice(callsBeforeRestart)
+  .filter(c => c.op === "detach").map(c => c.sessionId);
+assert.deepEqual(detachAfterRestart, [legacy.sessionId],
+  "启动迁移只摘「插件建过且从未投递」的空白任务会话");
+assert.equal(attached.has(legacy.sessionId), false, "启动迁移后旧空白任务会话不再是工作区成员");
+assert.equal(attached.has(legacyDelivered.sessionId), true, "已投递任务会话保持成员身份");
+restarted.stop();
 
 bridge.stop();
 console.log("✔ dsh-scheduled-send bridge smoke 全部通过");

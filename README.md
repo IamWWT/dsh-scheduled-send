@@ -5,7 +5,10 @@ DSH 定时任务插件：给**提示词**设定发送计划（单次 / 每天 / 
 本插件不重写调度，只补官方没有的四件事——**管理表单、有效期、执行状态观察、通知联动**，
 并让「定时任务」页取代官方「自动化任务」入口。
 
-现行版本 **0.10.6**；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+现行版本 **0.10.7**（任务会话不再占用工作区成员席位，修「新会话被任务标题命名」）；
+生产 `~/.dsh-dev/profiles/web` 现为 0.10.6（2026-10-27 17:22:50 重启；官方 `ui-schedule`
+已在 profile patch 中 `disabled`），0.10.7 待用户同意后安装重启；
+版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 效果预览
 
@@ -86,11 +89,11 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
 一律 **tgz 安装**（不用 link）；与 dsh-notify-alert ≥0.9.0 同装才有执行状态推送：
 
 ```bash
-pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.10.3.tgz
+pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.10.7.tgz
 
 # Ubuntu 源码版（CLI 不在 PATH；脚本默认 DSH_HOME=~/.dsh-dev、profile=web）
 DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
-  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.3.tgz --apply
+  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.7.tgz --apply
 
 # Windows 桌面版
 "<安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add <tgz 绝对路径>
@@ -125,7 +128,7 @@ pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --tok
 
 | 环境 | 支持度 | 验证状态 |
 |---|---|---|
-| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | **0.9.5 生产实装**（2026-10-26）：API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路通过 |
+| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | 生产 `~/.dsh-dev/profiles/web` 现为 **0.10.6**（2026-10-27 17:22:50 重启运行）；0.9.5 时的 API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路已通过；**0.10.7 仅在隔离 home（`ops/validation/notify-naming-20261028`）验过，未装生产** |
 | `windows-lite`（官方桌面版 profile `desktop`） | 全量 | **未在 Windows 实测**。调度跑在桌面 host 进程内，「离开电脑仍触发」前提是 dsh 进程保持运行；装完须**托盘退出后重开**才生效 |
 
 - 数据层：官方 `storages/schedule.json`（任务真身）+ `<stateDir>/tasks-meta.json`（插件元数据），
@@ -160,6 +163,22 @@ monorepo 目录 `dsh-plugins/dsh-scheduled-send/` 下，但**仍是独立 git �
 `dsh-plugins`/管理根的 gitlink，不进 monorepo 的版本同步范围）。
 遵循 [DeepSeek 共用目录约定](../../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)，管理根统一写作 `<DEEPSEEK_ROOT>`；
 Bash/systemd 命令只适用于 `ubuntu-4090`。
+
+## 任务会话与工作区成员席位（0.10.7）
+
+任务会话是「专属会话」，不是工作区里的一份空壳。插件建完会话、命名之后立刻用公开的
+`workspace.detachSession` 让它退出工作区成员席位：它不出现在工作区列表，也不会被 web 端
+「新会话」选中复用。
+
+原因（2026-10-28 生产实证）：宿主的「新会话」会把该工作区**第一个空白会话**交给
+`session.create` 复用（判据只有「没有 turn/start + 属于该工作区 + 未归档」）。任务会话恰好
+两样都占，又已被 rename 钉住任务标题 —— 用户点一次「新会话」，拿到的是叫「月报-月度总结」
+的任务会话，这就是「新会话名被写成任务标题」的根因。空白度是宿主内部状态，插件清不掉，
+能动的只有成员席位。
+
+任务第一次真实投递（官方 schedule framing）或用户点「立即执行」后，插件把会话挂回工作区：
+此时它已有真实轮次，不可能再被复用，用户照旧能点开看历史。升级后首次启动会做一次迁移，
+把旧版本留下的「空白任务会话」也退出列表（只处理插件建过且从未投递过的会话）。
 
 ## 周期任务与预置恢复（0.10.6）
 
