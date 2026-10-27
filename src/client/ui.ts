@@ -65,6 +65,7 @@ interface ApiTaskResponse {
 }
 
 interface ApiTasksResponse {
+  warnings?: string[];
   ok: boolean;
   version?: string;
   tasks?: TaskView[];
@@ -197,16 +198,18 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
       throw new Error("页面登录已过期：请刷新页面或重新用带 token 的链接打开");
     }
     const json = await r.json() as T;
+    const result=json as {ok?:boolean;error?:string};
+    if(r.status>=400 || result.ok===false)throw new Error(result.error??'请求未成功');
     return json;
   } finally {
     window.clearTimeout(timer);
   }
 }
 
-async function fetchTasks(): Promise<{ tasks: TaskView[]; scheduleService: boolean; version?: string }> {
+async function fetchTasks(): Promise<{ tasks: TaskView[]; scheduleService: boolean; version?: string; warnings: string[] }> {
   const r = await api<ApiTasksResponse>("/tasks");
   if (!r.ok || !Array.isArray(r.tasks)) throw new Error(r.error ?? "读取任务失败（host 未安装或版本不匹配）");
-  return { tasks: r.tasks, scheduleService: r.scheduleService !== false, version: r.version };
+  return { tasks: r.tasks, scheduleService: r.scheduleService !== false, version: r.version, warnings:r.warnings??[] };
 }
 
 async function fetchHealth(): Promise<ApiHealthResponse> {
@@ -648,18 +651,22 @@ export function makeUI(React: unknown, _ctx: Ctx) {
         .then(() => p.onRefresh())
         .catch(e => window.alert("立即执行失败：" + String((e as Error).message)));
     };
+    const togglePause=():void=>{
+      void api('/tasks/'+(t.status==='paused'?'resume':'pause'),{method:'POST',body:JSON.stringify({id:t.id})})
+        .then(p.onRefresh).catch(e=>window.alert('操作失败：'+String((e as Error).message)));
+    };
     return h("div", { className: "dss-card" },
       h("div", { className: "dss-card-main" },
         h("div", { className: "dss-card-title" },
           t.title,
-          h("span", { className: `dss-badge ${tone}` }, active ? "待执行" : "已结束"),
+          h("span", { className: `dss-badge ${tone}` }, active ? "待执行" : t.status==='paused'?'已暂停':'已结束'),
           last !== undefined
             ? h("span", { className: `dss-badge ${executionTone(last.status)}` }, `最近：${statusLabel(last.status)}`)
             : h("span", { className: "dss-badge dss-badge-ended" }, "尚未执行")),
         h("div", { className: "dss-card-prompt", title: t.prompt }, t.prompt),
         h("div", { className: "dss-card-meta" },
           h("span", null, frequencyLabel(t.frequency)),
-          h("span", null, active ? `下次 ${fmtDateTime(t.scheduledAt)} · ${countdown(t.scheduledAt)}` : `已结束`),
+          h("span", null, active ? `下次 ${fmtDateTime(t.scheduledAt)} · ${countdown(t.scheduledAt)}` : t.status==='paused'?'暂停期间不触发，恢复后按周期重新排期':'已结束'),
           t.endsAt !== undefined ? h("span", null, `截止 ${fmtDateTime(t.endsAt)}`) : null,
           h("span", { title: t.sessionId }, `会话 ${t.sessionTitle ?? t.sessionId.slice(0, 12)}`),
           t.model !== undefined ? h("span", { title: `${t.model.provider}/${t.model.model}` }, `模型 ${t.model.modelName ?? t.model.model}`) : null,
@@ -676,7 +683,9 @@ export function makeUI(React: unknown, _ctx: Ctx) {
         p.openSession !== undefined
           ? h("button", { type: "button", className: "dss-btn-ghost", onClick: () => { try { p.openSession?.(t.sessionId); } catch (e) { window.alert("打开会话失败：" + String((e as Error).message)); } } }, "打开会话")
           : null,
-        h("button", { type: "button", className: "dss-btn-ghost dss-btn-danger", onClick: remove }, "删除")));
+        t.builtin===true
+          ? (active||t.status==='paused'?h('button',{type:'button',className:'dss-btn-ghost',onClick:togglePause},t.status==='paused'?'恢复任务':'暂停任务'):null)
+          : h("button", { type: "button", className: "dss-btn-ghost dss-btn-danger", onClick: remove }, "删除")));
   };
 
   const TaskPage: (p: PageInjected & { embedded?: boolean }) => unknown = (p) => {
@@ -687,10 +696,12 @@ export function makeUI(React: unknown, _ctx: Ctx) {
     const [modal, setModal] = useState<{ task: TaskView | null } | null>(null);
     const [showEnded, setShowEnded] = useState(false);
     const [tab, setTab] = useState<"custom" | "builtin">("custom");
+    const [warnings,setWarnings]=useState<string[]>([]);
+    const [restoring,setRestoring]=useState(false);
 
     const refresh = (): void => {
       void fetchTasks().then(
-        r => { setTasks(r.tasks); setLoadError(null); setLoading(false); },
+        r => { setTasks(r.tasks);setWarnings(r.warnings); setLoadError(null); setLoading(false); },
         (e: unknown) => { setLoadError(String((e as Error)?.message ?? e)); setLoading(false); },
       );
       void fetchHealth().then(setHealth);
@@ -707,7 +718,19 @@ export function makeUI(React: unknown, _ctx: Ctx) {
     const builtins = tasks.filter(t => t.builtin === true);
     const visible = tab === "builtin" ? builtins : custom;
     const active = visible.filter(t => t.status === "active").sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
-    const ended = visible.filter(t => t.status !== "active");
+    const paused = visible.filter(t=>t.status==='paused');
+    const ended = visible.filter(t => t.status === "inactive");
+    const restore=():void=>{
+      if(restoring)return;
+      setRestoring(true);
+      void api<{defaults:Array<{title:string;definition:{frequency:Frequency;prompt:string}}>}>('/defaults').then(async value=>{
+        if(!value.defaults.length)throw new Error('尚未登记预置基线');
+        const preview=value.defaults.map(x=>`${x.title} · ${frequencyLabel(x.definition.frequency)}`).join('\n');
+        if(!window.confirm('恢复以下预置任务的默认配置？\n\n'+preview+'\n\n仅更新或补齐预置任务；保留暂停状态，不影响自定义任务。当前配置会先备份。'))return;
+        await api('/defaults/restore',{method:'POST',body:JSON.stringify({confirm:true})});
+        refresh();
+      }).catch(e=>window.alert('恢复默认失败：'+String((e as Error).message))).finally(()=>setRestoring(false));
+    };
     const next = active[0];
     const tabButton = (k: "custom" | "builtin", label: string, n: number) =>
       h("button", {
@@ -736,7 +759,10 @@ export function makeUI(React: unknown, _ctx: Ctx) {
             : null)),
       h("div", { className: "dss-inline", style: { gap: 6 } },
         tabButton("custom", "自定义任务", custom.length),
-        tabButton("builtin", "预置任务", builtins.length)),
+        tabButton("builtin", "预置任务", builtins.length),
+        tab==='builtin'?h('button',{type:'button',className:'dss-btn-ghost',onClick:restore,'aria-busy':restoring},restoring?'正在恢复…':'恢复默认配置'):null),
+      ...warnings.map(w=>h('div',{key:w,className:'dss-err',role:'alert'},w)),
+      tab==='builtin'?h('p',{className:'dss-note'},'预置任务可临时暂停，配置保留；恢复后按周期重新排期。关联会话归档时，周期任务自动迁到新的任务会话。'):null,
       h("div", { className: "dss-summary" },
         h("span", { className: "dss-stat" }, "待执行 ", h("b", null, String(active.length))),
         h("span", { className: "dss-stat" }, "已结束 ", h("b", null, String(ended.length))),
@@ -761,6 +787,7 @@ export function makeUI(React: unknown, _ctx: Ctx) {
               onRefresh: refresh,
               ...(p.openSession === undefined ? {} : { openSession: p.openSession }),
             }))),
+      paused.length?h('section',null,h('h3',null,`已暂停（${paused.length}）`),...paused.map(t=>h(TaskRow,{key:t.id,task:t,onEdit:()=>{},onRefresh:refresh,...(p.openSession?{openSession:p.openSession}:{})}))):null,
       ended.length > 0
         ? h("div", null,
             h("button", { type: "button", className: "dss-group-head", onClick: () => setShowEnded(v => !v) },

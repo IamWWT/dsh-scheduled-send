@@ -5,7 +5,7 @@ DSH 定时任务插件：给**提示词**设定发送计划（单次 / 每天 / 
 本插件不重写调度，只补官方没有的四件事——**管理表单、有效期、执行状态观察、通知联动**，
 并让「定时任务」页取代官方「自动化任务」入口。
 
-现行版本 **0.10.2**；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+现行版本 **0.10.6**；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 效果预览
 
@@ -86,11 +86,11 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
 一律 **tgz 安装**（不用 link）；与 dsh-notify-alert ≥0.9.0 同装才有执行状态推送：
 
 ```bash
-pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.10.2.tgz
+pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.10.3.tgz
 
 # Ubuntu 源码版（CLI 不在 PATH；脚本默认 DSH_HOME=~/.dsh-dev、profile=web）
 DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
-  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.2.tgz --apply
+  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.3.tgz --apply
 
 # Windows 桌面版
 "<安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add <tgz 绝对路径>
@@ -160,3 +160,13 @@ monorepo 目录 `dsh-plugins/dsh-scheduled-send/` 下，但**仍是独立 git �
 `dsh-plugins`/管理根的 gitlink，不进 monorepo 的版本同步范围）。
 遵循 [DeepSeek 共用目录约定](../../dsh-agent-presets/docs/DIRECTORY-LAYOUT.md)，管理根统一写作 `<DEEPSEEK_ROOT>`；
 Bash/systemd 命令只适用于 `ubuntu-4090`。
+
+## 周期任务与预置恢复（0.10.6）
+
+周期任务不随投递会话归档消失。插件保存配置快照，官方归档停止原任务后，在原工作区创建新任务会话并交给官方 Schedule 重新排期。一次性任务保留官方归档停止行为；用户显式删除、截止到期不会自动复活。迁移改变官方任务 id，原投递历史留在原会话；不补投归档期间错过的执行。
+
+预置任务页提供「暂停任务 / 恢复任务」，没有删除按钮。暂停不丢配置、不触发后续排期，不中断已经开始的模型执行；恢复后按周期重新排期。「恢复默认配置」先预览确认，仅更新或补齐预置任务，保留暂停状态，不影响自定义任务。基线为新版本首次接管时登记的配置，之后编辑不覆盖它。
+
+插件状态目录新增 `task-protection.json`（周期配置、预置基线、暂停与迁移意图）及 `reset-backups/`（恢复前配置备份）。它们只保存在本机，不提交会话/提示词。调度、时间计算和投递仍全部走官方服务；插件不自建调度器。原工作区失效时保留配置并在列表提示错误，修复工作区后重试。
+
+实现与验收见 [归档保护任务](docs/管理/PP-20261026-归档保护与默认恢复.md)。Ubuntu 隔离和生产结果以任务记录为准，Windows 未实测。

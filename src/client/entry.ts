@@ -85,7 +85,7 @@ window.__ModuleLoader__?.load({
 
     return {
       name: "scheduled-send",
-      inject: ["slots", "timer", "sessions", "workspaces", "remote.agentPresets", "remote.session"],
+      inject: ["slots", "timer", "sessions", "workspaces", "uiWorkspace", "remote.agentPresets", "remote.session"],
       apply(ctx: { get: (k: string) => unknown }) {
         const slots = ctx.get("slots") as Slots | undefined;
         if (!slots) return;
@@ -93,7 +93,7 @@ window.__ModuleLoader__?.load({
         const sessionsSvc = ctx.get("sessions") as
           | { open?: (id: string) => void; list?: { getSnapshot: () => unknown } }
           | undefined;
-        const opener = sessionOpenerOf(sessionsSvc);
+        const opener = sessionOpenerOf(ctx.get("uiWorkspace") as {openSession?: (id:string)=>void});
         const sessionMeta = (() => {
           try {
             const snap = sessionsSvc?.list?.getSnapshot?.() as

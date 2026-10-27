@@ -6,12 +6,13 @@
 ## 定位（为什么存在）
 
 官方 `ctx.schedule`（`@deepseek-ai/dsh-schedule`）已具备定时、持久化、重复规则、会话投递与错过补投，
-但缺 WorkBuddy 式表单、有效期、执行状态与通知。本插件只做**四件官方没做的事**：
+但缺 WorkBuddy 式表单、有效期、执行状态与通知。本插件补充以下管理能力：
 
 1. **管理面**：任务页 + 表单 + 侧栏入口 + 输入框快捷排期；
 2. **工作区任务会话**：未指定会话时自动建会话并绑定；
 3. **有效期**：`endsAt` 元数据 + 到期删除官方任务；
-4. **执行状态观察**：解析 schedule framing + `turn/end` 归因，供 notify-alert 推送。
+4. **执行状态观察**：解析 schedule framing + `turn/end` 归因，供 notify-alert 推送；
+5. **配置保护**：周期任务归档后通过公开服务迁移；预置基线支持暂停/恢复与默认恢复。快照不执行调度。
 
 禁止重写调度语义、持久化、投递通道——一律走 `ctx.schedule`；通知发送代码禁止进本插件
 （由 dsh-notify-alert 独立观察会话事件完成，**插件间不建包依赖**，只共享官方事件契约）。
@@ -20,7 +21,7 @@
 
 - **版本五处同步**：`package.json.version` = `src/index.ts` 的 `VERSION` = tgz 文件名 = README/CHANGELOG 提及
   = profile 依赖行。改版本后自检：`grep -rn "0\.x\.y" README.md CHANGELOG.md docs package.json src`。
-- **host inject 三件套**：`export const inject = ["webServer", "schedule", "sessionController"]`；
+- **host inject**：`export const inject = ["webServer", "schedule", "sessionController", "workspaceRegistry", "sessions"]`；
   去掉 `schedule` 则控制面瘫痪。宿主服务方法一律 `method.call(svc, ...)` 保 this，禁止拆出裸函数再调。
 - **不 import `@deepseek-ai/*` 类型包**：插件构建解析不到（TS2307）。宿主面用 `bridge.ts` 内的
   本地结构化接口（`ScheduleServiceLike` 等）声明；上游契约变化先核对再改本地声明。

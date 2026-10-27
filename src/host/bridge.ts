@@ -77,6 +77,7 @@ type ScheduleDeliveryHistoryResultLike =
   | { records: DeliveryReceiptLike[]; nextBefore?: string; earlierRecordsUnavailable?: boolean }
   | { code: string; message?: string };
 import { MetaStore, type TaskMeta } from "./meta.ts";
+import { ProtectionStore } from "./protection.ts";
 import {
   EXECUTION_SUMMARY_MAX,
   MAX_VALIDITY_DAYS,
@@ -121,6 +122,7 @@ interface HostSessionLike {
 }
 
 interface BridgeCtx {
+  workspaceRegistry?: { list(): Array<{id: string; path: string; sessionIds: readonly string[]}>; readonly archivedSessionIds: readonly string[] };
   schedule: ScheduleServiceLike;
   sessionController: SessionControllerLike;
   sessions?: { get?: (id: SessionId) => HostSessionLike | undefined };
@@ -148,6 +150,9 @@ export interface ExecutionUpdate {
 
 export class ScheduleBridge {
   private readonly meta: MetaStore;
+  private readonly protection: ProtectionStore;
+  private protectionWarnings: string[] = [];
+  private resetChain: Promise<unknown> = Promise.resolve();
   private readonly ctx: BridgeCtx;
   private readonly version: string;
   private catalogCache: ScheduleCatalogEntryLike[] = [];
@@ -163,6 +168,7 @@ export class ScheduleBridge {
   constructor(ctx: unknown, stateDir: string, version: string) {
     this.ctx = ctx as BridgeCtx;
     this.meta = new MetaStore(stateDir);
+    this.protection = new ProtectionStore(stateDir);
     this.version = version;
   }
 
@@ -177,12 +183,12 @@ export class ScheduleBridge {
       this.ctx.logger?.warn?.(`[dsh-scheduled-send] 无法监听 session/event：${String((e as Error)?.message ?? e)}`);
     }
     try {
-      const offChanged = this.ctx.on("schedule/changed", (() => { void this.refresh(); }) as never, { global: true });
+      const offChanged = this.ctx.on("schedule/changed", (() => { void this.refresh().catch(()=>{}); }) as never, { global: true });
       this.disposers.push(offChanged);
     } catch {
       // 事件名在旧宿主不存在时不影响主流程（列表仍会轮询刷新）。
     }
-    void this.refresh();
+    void this.refresh().catch(()=>{});
   }
 
   stop(): void {
@@ -196,17 +202,52 @@ export class ScheduleBridge {
 
   /** 读官方目录并补全/清理元数据；所有写操作之后都会调用，保证列表一致。 */
   refresh(): Promise<void> {
-    this.refreshChain = this.refreshChain
-      .then(() => this.doRefresh())
-      .catch((e: unknown) => {
+    const run=this.refreshChain.then(() => this.doRefresh());
+    this.refreshChain = run.catch((e: unknown) => {
         this.ctx.logger?.warn?.(`[dsh-scheduled-send] 刷新任务失败：${String((e as Error)?.message ?? e)}`);
       });
-    return this.refreshChain;
+    return run;
   }
 
   private async doRefresh(): Promise<void> {
     if (this.stopped) return;
-    const entries = await this.ctx.schedule.catalog();
+    let entries = await this.ctx.schedule.catalog();
+    // A persisted pause is an intent to disarm. Finish it after an interrupted
+    // process before exposing the paused row; never run a second scheduler.
+    for(const baseline of this.protection.data.defaults){
+      if(!baseline.pausedTask)continue;
+      if(this.protection.data.moves[baseline.taskId]){
+        const task=baseline.pausedTask,workspaceId=this.workspaceFor(task);
+        if(!workspaceId)throw new Error(`「${task.title}」恢复任务的工作区不可用，配置已保留`);
+        const resumed=await this.createOfficial(this.requestOf(task,workspaceId),baseline.taskId);
+        delete baseline.pausedTask;
+        this.protection.rebind(baseline.taskId,resumed.id);
+        continue;
+      }
+      const armed=entries.find(x=>x.id===baseline.taskId);
+      if(armed)await this.ctx.schedule.delete({sessionId:armed.sessionId,id:armed.id});
+      this.protection.forget(baseline.taskId);
+    }
+    entries=await this.ctx.schedule.catalog();
+    const idsBefore = new Set(entries.map(x=>x.id));
+    const archived = new Set(this.ctx.workspaceRegistry?.archivedSessionIds ?? []);
+    this.protectionWarnings=[];
+    for(const task of Object.values(this.protection.data.recurring)) {
+      if(idsBefore.has(task.id))continue;
+      if(task.endsAt!==undefined && task.endsAt<=Date.now()){this.protection.forget(task.id);continue;}
+      if(!archived.has(task.sessionId)){this.protection.forget(task.id);continue;}
+      try {
+        const workspaceId=this.workspaceFor(task);
+        if(!workspaceId)throw new Error('原工作区不可用，请恢复工作区后重试');
+        const restored=await this.createOfficial(this.requestOf(task,workspaceId),task.id);
+        this.meta.set(restored.id,{createdAt:task.createdAt,...(task.lastExecution?{lastExecution:task.lastExecution}:{})});
+        this.protection.rebind(task.id,restored.id);
+      }catch(error){
+        const warning=`周期任务「${task.title}」归档迁移失败，配置已保留：${String((error as Error)?.message??error)}`;
+        this.protectionWarnings.push(warning);this.ctx.logger?.warn?.(warning);
+      }
+    }
+    entries=await this.ctx.schedule.catalog();
     this.catalogCache = entries;
     const ids = new Set(entries.map(entry => entry.id));
     this.meta.reconcile(ids);
@@ -221,12 +262,16 @@ export class ScheduleBridge {
       }
     }
     if (changed) this.meta.flush();
+    this.protection.capture(entries.map(entry=>{
+      const view=this.toView(entry),workspaceId=this.workspaceFor(view);
+      return {...view,...(workspaceId?{workspaceId}:{})};
+    }));
     this.armValidity();
   }
 
   async list(): Promise<TaskView[]> {
     await this.refresh();
-    return this.catalogCache.map(entry => this.toView(entry));
+    return [...this.catalogCache.map(entry => this.toView(entry)),...this.protection.data.defaults.flatMap(x=>x.pausedTask?[{...x.pausedTask,id:x.taskId,status:'paused' as const}]:[])];
   }
 
   async health(): Promise<{ scheduleService: boolean; active: number; total: number }> {
@@ -243,6 +288,12 @@ export class ScheduleBridge {
   }
 
   async create(input: TaskCreateRequest): Promise<TaskView> {
+    const entry=await this.createOfficial(input);
+    await this.refresh();
+    return this.toView(this.catalogCache.find(x=>x.id===entry.id)??entry);
+  }
+
+  private async createOfficial(input: TaskCreateRequest,moveFrom?:string): Promise<ScheduleCatalogEntryLike> {
     const title = input.title.trim();
     const prompt = input.prompt.trim();
     if (title === "") throw new Error("任务名称不能为空");
@@ -251,9 +302,15 @@ export class ScheduleBridge {
       throw new Error("workspaceId 与 sessionId 只能选一个");
     }
     const endsAt = normalizeEndsAt(input.endsAt, input.frequency);
-    const target = await this.resolveTarget(input);
+    const pending=moveFrom?this.protection.data.moves[moveFrom]:undefined;
+    const reuse=pending && !this.ctx.workspaceRegistry?.archivedSessionIds.includes(pending);
+    const target = reuse?{sessionId:pending,workspaceId:input.workspaceId,sessionTitle:title}:await this.resolveTarget(input);
+    if(moveFrom){this.protection.data.moves[moveFrom]=target.sessionId;this.protection.save();}
     if (input.model !== undefined) await this.applyModel(target.sessionId, input.model);
-    const record = await this.ctx.schedule.create(target.sessionId, toCreateRequest(input.frequency, title, prompt));
+    // A recovery may have committed its official row just before a crash.
+    // The persisted dedicated target makes retry adoption unambiguous.
+    const committed=moveFrom?(await this.ctx.schedule.catalog()).find(x=>x.sessionId===target.sessionId && x.title===title && x.prompt===prompt):undefined;
+    const record = committed??await this.ctx.schedule.create(target.sessionId, toCreateRequest(input.frequency, title, prompt));
     this.meta.set(record.id, {
       notify: input.notify !== false,
       createdAt: Date.now(),
@@ -265,13 +322,11 @@ export class ScheduleBridge {
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.builtin === true ? { builtin: true } : {}),
     });
-    await this.refresh();
-    const entry = this.catalogCache.find(x => x.id === record.id);
-    return this.toView(entry ?? {
+    return {
       ...record,
       sessionId: target.sessionId,
       status: "active",
-    } as ScheduleCatalogEntryLike);
+    } as ScheduleCatalogEntryLike;
   }
 
   async update(input: TaskUpdateRequest): Promise<TaskView> {
@@ -325,14 +380,88 @@ export class ScheduleBridge {
   }
 
   async delete(id: string): Promise<void> {
+    const paused=this.protection.data.defaults.find(x=>x.taskId===id&&x.pausedTask);
+    if(paused){delete paused.pausedTask;this.protection.save();}
     const entry = await this.findEntry(id);
     if (entry === undefined) {
       this.meta.remove(id);
+      this.protection.forget(id);
       return;
     }
     await this.ctx.schedule.delete({ sessionId: entry.sessionId, id: entry.id });
+    this.protection.forget(id);
     this.meta.remove(id);
     await this.refresh();
+  }
+
+  defaults(): {defaults: Array<{key:string; title:string; taskId:string; definition:TaskCreateRequest}>; warnings:string[]} {
+    return {defaults:this.protection.data.defaults.map(x=>({key:x.key,title:x.task.title,taskId:x.taskId,definition:this.requestOf(x.task,this.workspaceFor(x.task))})),warnings:[...this.protectionWarnings]};
+  }
+
+  restoreDefaults(): Promise<{restored:number}> {
+    const run=this.resetChain.then(async()=>{
+      await this.refresh();
+      if(this.protection.data.defaults.length===0)throw new Error('尚未登记预置基线，请先由集成方创建 builtin 任务');
+      this.protection.backup(this.catalogCache.map(x=>this.toView(x)));
+      let restored=0;
+      for(const baseline of this.protection.data.defaults){
+        const task=baseline.task,existing=this.catalogCache.find(x=>x.id===baseline.taskId);
+        if(baseline.pausedTask){
+          baseline.pausedTask={...task,id:baseline.taskId,status:'paused'};this.protection.save();
+        }else if(existing?.status==='active'){
+          await this.update({id:existing.id,title:task.title,prompt:task.prompt,frequency:task.frequency,endsAt:task.endsAt??null,notify:task.notify,builtin:true,model:task.model??null});
+        }else{
+          const workspaceId=this.workspaceFor(task);
+          if(!workspaceId)throw new Error(`「${task.title}」原工作区不可用`);
+          const entry=await this.createOfficial(this.requestOf(task,workspaceId),baseline.taskId);
+          this.protection.rebind(baseline.taskId,entry.id);
+          await this.refresh();
+        }
+        restored++;
+      }
+      return{restored};
+    });
+    this.resetChain=run.catch(()=>{});return run;
+  }
+
+  async pause(id: string): Promise<void> {
+    await this.refresh();
+    const baseline=this.protection.data.defaults.find(x=>x.taskId===id);
+    if(!baseline)throw new Error('仅预置任务支持暂停');
+    if(baseline.pausedTask)return;
+    const entry=this.catalogCache.find(x=>x.id===id);
+    if(!entry)throw new Error('任务已不存在，请先恢复默认配置');
+    const snapshot=this.toView(entry);
+    baseline.pausedTask={...snapshot,...(this.workspaceFor(snapshot)?{workspaceId:this.workspaceFor(snapshot)}:{})};
+    this.protection.forget(id);this.protection.save();
+    await this.ctx.schedule.delete({sessionId:entry.sessionId,id});
+    await this.refresh();
+  }
+
+  resume(id: string): Promise<void> {
+    const run=this.resetChain.then(async()=>{
+      const baseline=this.protection.data.defaults.find(x=>x.taskId===id);
+      if(!baseline?.pausedTask)return;
+      const task=baseline.pausedTask,workspaceId=this.workspaceFor(task);
+      if(!workspaceId)throw new Error('原工作区不可用，任务仍保持暂停');
+      const entry=await this.createOfficial(this.requestOf(task,workspaceId),id);
+      delete baseline.pausedTask;
+      this.protection.rebind(id,entry.id);
+      await this.refresh();
+    });
+    this.resetChain=run.catch(()=>{});return run;
+  }
+
+  private workspaceFor(task: Pick<TaskView,'workspaceId'|'sessionId'>): string|undefined {
+    const registry=this.ctx.workspaceRegistry;
+    if(!registry)return task.workspaceId;
+    const rows=registry.list();
+    if(task.workspaceId && rows.some(x=>x.id===task.workspaceId))return task.workspaceId;
+    return rows.find(x=>x.sessionIds.includes(task.sessionId))?.id;
+  }
+
+  private requestOf(task: TaskView, workspaceId?:string): TaskCreateRequest {
+    return {title:task.title,prompt:task.prompt,frequency:task.frequency,...(workspaceId?{workspaceId}:{}),notify:task.notify,...(task.endsAt!==undefined?{endsAt:task.endsAt}:{}),...(task.agentPreset?{agentPreset:task.agentPreset}:{}),...(task.model?{model:task.model}:{}),...(task.builtin?{builtin:true}:{})};
   }
 
   async deleteInactive(): Promise<number> {

@@ -18,12 +18,13 @@ export const name = "scheduled-send";
 
 /**
  * Cordis 依赖注入声明：官方 Schedule 服务与 Session 控制面是硬依赖；
- * webServer 用于本插件 HTTP 路由。connection 由路由惰性解析（旧宿主可能没有）。
+ * webServer 用于本插件 HTTP 路由；sessions 供「现有会话」目标解析（bridge 读取）。
+ * connection 由路由惰性解析（旧宿主可能没有）。
  */
-export const inject = ["webServer", "schedule", "sessionController"];
+export const inject = ["webServer", "schedule", "sessionController", "workspaceRegistry", "sessions"];
 
 /** 与 package.json 同步。 */
-export const VERSION = "0.10.2";
+export const VERSION = "0.10.6";
 
 export { ScheduleBridge, type ExecutionUpdate } from "./host/bridge.ts";
 export type { TaskMeta } from "./host/meta.ts";

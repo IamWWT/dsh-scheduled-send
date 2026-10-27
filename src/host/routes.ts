@@ -151,7 +151,7 @@ export function registerRoutes(ctx: unknown, bridge: ScheduleBridge, version: st
           tasks,
           scheduleService: health.scheduleService,
         };
-        sendJson(res, 200, body);
+        sendJson(res, 200, {...body, warnings:bridge.defaults().warnings});
       } catch (e) {
         const body: TaskListResponse = {
           ok: false,
@@ -179,6 +179,24 @@ export function registerRoutes(ctx: unknown, bridge: ScheduleBridge, version: st
     } catch (e) {
       sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
     }
+  });
+
+  R('/defaults',async(req,res)=>{
+    if(methodOf(req)!=='GET'){sendJson(res,405,{ok:false,error:'仅支持 GET'});return;}
+    await bridge.list();
+    sendJson(res,200,{ok:true,...bridge.defaults()});
+  });
+  R('/defaults/restore',async(req,res)=>{
+    if(methodOf(req)!=='POST'){sendJson(res,405,{ok:false,error:'仅支持 POST'});return;}
+    const body=await readJsonBody<{confirm?:boolean}>(req);
+    if(body?.confirm!==true){sendJson(res,400,{ok:false,error:'请先预览并确认恢复预置任务'});return;}
+    sendJson(res,200,{ok:true,...await bridge.restoreDefaults()});
+  });
+  for(const action of ['pause','resume'] as const)R('/tasks/'+action,async(req,res)=>{
+    if(methodOf(req)!=='POST'){sendJson(res,405,{ok:false,error:'仅支持 POST'});return;}
+    const body=await readJsonBody<{id?:string}>(req);
+    if(typeof body?.id!=='string'||!body.id){sendJson(res,400,{ok:false,error:'缺少任务 id'});return;}
+    await bridge[action](body.id);sendJson(res,200,{ok:true});
   });
 
   R("/tasks/update", async (req, res) => {

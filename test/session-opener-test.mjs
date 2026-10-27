@@ -1,8 +1,8 @@
 /**
  * sessionOpenerOf — 跳转 helper 单元测试。
  *
- * 背景（v0.6.0 真实故障）：DSH 的 `ISessions.open(id)` 方法体依赖 `this.manager`
- *（service.ts: `open(id){ this.manager.select(id) }`）。旧实现 `const f = svc.open; f(id)`
+ * 背景（v0.6.0 真实故障）：DSH 的 `UiWorkspace.openSession(id)` 方法体依赖 `this.manager`
+ *（service.ts: `open(id){ this.manager.select(id) }`）。旧实现 `const f = svc.openSession; f(id)`
  * 把方法拆出再调，`this` 变 undefined → 报
  * `Cannot read properties of undefined (reading 'manager')`。
  *
@@ -27,8 +27,8 @@ function makeFakeService() {
     manager: {
       select: (id) => { opened.push(id); },
     },
-    open: function open(id) {
-      // 与 DSH service.open 同构：访问 this.manager（解构调用时会炸）
+    openSession: function openSession(id) {
+      // 与 DSH service.openSession 同构：访问 this.manager（解构调用时会炸）
       this.manager.select(id);
     },
   };
@@ -41,7 +41,7 @@ const ok = (name) => { passed += 1; console.log(`  PASS  ${name}`); };
 // ---- 1) 复现旧 bug：解构方法再调用 → this undefined → reading 'manager' ----
 {
   const { service } = makeFakeService();
-  const f = service.open; // 旧实现的错误姿势
+  const f = service.openSession; // 旧实现的错误姿势
   let threw = null;
   try { f("sess-x"); } catch (e) { threw = String(e?.message ?? e); }
   assert.ok(
@@ -66,7 +66,7 @@ const ok = (name) => { passed += 1; console.log(`  PASS  ${name}`); };
 {
   assert.equal(sessionOpenerOf(undefined), undefined, "服务缺失 → undefined");
   assert.equal(sessionOpenerOf({}), undefined, "服务无 open → undefined");
-  assert.equal(sessionOpenerOf({ open: "not-a-fn" }), undefined, "open 非函数 → undefined");
+  assert.equal(sessionOpenerOf({ openSession: "not-a-fn" }), undefined, "open 非函数 → undefined");
   ok("降级分支：无服务 / 无 open / open 非函数 → undefined");
 }
 

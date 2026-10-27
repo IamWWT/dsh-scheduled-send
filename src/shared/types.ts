@@ -74,7 +74,7 @@ export interface TaskView {
   /** 官方记录里已提交的下一次（或最终）触发时刻，RFC3339 UTC。 */
   scheduledAt: string;
   /** 官方 active/inactive；inactive = 已结束，但记录仍可查看。 */
-  status: "active" | "inactive";
+  status: "active" | "inactive" | "paused";
   /** 插件元数据：重复任务的截止时刻（epoch ms）；到期后插件删除官方任务。 */
   endsAt?: number;
   /** 插件元数据：是否推送执行状态（当前版本由 notify-alert 全局控制，保留字段供后续）。 */
