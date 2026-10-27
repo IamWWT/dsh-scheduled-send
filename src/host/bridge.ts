@@ -77,17 +77,19 @@ type ScheduleDeliveryHistoryResultLike =
   | { records: DeliveryReceiptLike[]; nextBefore?: string; earlierRecordsUnavailable?: boolean }
   | { code: string; message?: string };
 import { MetaStore, type TaskMeta } from "./meta.ts";
-import { ProtectionStore } from "./protection.ts";
+import { ProtectionStore, recurring } from "./protection.ts";
 import {
   EXECUTION_SUMMARY_MAX,
   MAX_VALIDITY_DAYS,
 } from "../shared/constants.ts";
+import { perRunSessionTitle, sessionModeFor } from "../shared/types.ts";
 import type {
   DeliveryReceipt,
   ExecutionRecord,
   ExecutionStatus,
   Frequency,
   ModelRef,
+  SessionMode,
   TaskCreateRequest,
   TaskHistoryPage,
   TaskHistoryRequest,
@@ -146,6 +148,9 @@ interface PendingExecution {
   startedAt: number;
 }
 
+/** 同一次投递最多尝试轮转几次（失败后保持原会话，等下一次投递再试）。 */
+const MAX_ROTATE_ATTEMPTS = 2;
+
 /** 本插件触发的执行状态事件（Host 内部；列表展示与日志用）。 */
 export interface ExecutionUpdate {
   taskIds: string[];
@@ -174,6 +179,13 @@ export class ScheduleBridge {
   private readonly disposers: Array<() => void> = [];
   private refreshChain: Promise<void> = Promise.resolve();
   private stopped = false;
+  /** per-run 轮转的重入闸门（同一任务同时只允许一个轮转）。 */
+  private readonly rotating = new Set<string>();
+  /**
+   * 轮转后的 id 映射（旧 → 新）。官方任务 id 是服务端分配的，轮转必然换 id；
+   * 页面拿着旧 id 点「编辑/删除/立即执行」时据此跟随到当前任务（不跨重启，够用）。
+   */
+  private readonly rotatedTo = new Map<string, string>();
   /** 0.10.7 一次性迁移：把历史遗留的「空白任务会话」退出工作区列表。 */
   private stubSeatsReleased = false;
 
@@ -260,9 +272,15 @@ export class ScheduleBridge {
       }
     }
     entries=await this.ctx.schedule.catalog();
+    // 0.10.8 per-run：先收尾崩溃留下的半截交换，再对「已投递但还没轮转」的任务轮转。
+    // 顺序不能反：半截交换未收尾时同一任务会再轮转一次，造成重复任务、同一提示词投两次。
+    if (await this.completePendingSwaps(entries)) entries = await this.ctx.schedule.catalog();
+    if (await this.rotatePerRun(entries)) entries = await this.ctx.schedule.catalog();
+    // 快照时刻要早于这次读：读完之后并发写进来的元数据（新建任务/轮转新任务）不能被对账清掉。
+    const snapshotAt = Date.now();
     this.catalogCache = entries;
     const ids = new Set(entries.map(entry => entry.id));
-    this.meta.reconcile(ids);
+    this.meta.reconcile(ids, this.keptMetaIds(), snapshotAt);
     let changed = false;
     for (const entry of entries) {
       const before = this.meta.get(entry.id);
@@ -320,6 +338,8 @@ export class ScheduleBridge {
       throw new Error("workspaceId 与 sessionId 只能选一个");
     }
     const endsAt = normalizeEndsAt(input.endsAt, input.frequency);
+    // 会话模式在创建时归一一次（单次任务固定 fixed；builtin 采集类默认 per-run）。
+    const sessionMode = sessionModeFor(input);
     const pending=moveFrom?this.protection.data.moves[moveFrom]:undefined;
     const reuse=pending && !this.ctx.workspaceRegistry?.archivedSessionIds.includes(pending);
     const target = reuse?{sessionId:pending,workspaceId:input.workspaceId,sessionTitle:title}:await this.resolveTarget(input);
@@ -339,6 +359,7 @@ export class ScheduleBridge {
       ...(input.agentPreset === undefined || input.agentPreset === "" ? {} : { agentPreset: input.agentPreset }),
       ...(input.model === undefined ? {} : { model: input.model }),
       ...(input.builtin === true ? { builtin: true } : {}),
+      sessionMode,
     });
     return {
       ...record,
@@ -383,6 +404,16 @@ export class ScheduleBridge {
       if (input.builtin) currentMeta.builtin = true;
       else delete currentMeta.builtin;
     }
+    if (input.sessionMode !== undefined) {
+      const mode: SessionMode = input.sessionMode;
+      if (mode === "per-run") {
+        // 单次任务没有「下一次执行」，轮转无意义：报错而不是静默降级。
+        if (!isRecurringRecord(entry)) throw new Error("单次任务不支持「每次执行新建会话」");
+        currentMeta.sessionMode = "per-run";
+      } else currentMeta.sessionMode = "fixed";
+      // 改模式本身不触发轮转：per-run 从下一次投递之后开始换会话，fixed 立即停在当前会话。
+      delete currentMeta.rotateError;
+    }
     if (input.model !== undefined) {
       if (input.model === null) delete currentMeta.model;
       else {
@@ -393,7 +424,7 @@ export class ScheduleBridge {
     currentMeta.title = (title ?? entry.title);
     this.meta.flush();
     await this.refresh();
-    const updated = this.catalogCache.find(x => x.id === entry.id);
+    const updated = this.catalogCache.find(x => x.id === entry.id) ?? this.catalogCache.find(x => x.id === this.rotatedTo.get(entry.id));
     return this.toView(updated ?? entry);
   }
 
@@ -407,8 +438,12 @@ export class ScheduleBridge {
       return;
     }
     await this.ctx.schedule.delete({ sessionId: entry.sessionId, id: entry.id });
-    this.protection.forget(id);
-    this.meta.remove(id);
+    this.protection.forget(entry.id);
+    this.meta.remove(entry.id);
+    if (entry.id !== id) {
+      this.protection.forget(id);
+      this.meta.remove(id);
+    }
     await this.refresh();
   }
 
@@ -479,7 +514,7 @@ export class ScheduleBridge {
   }
 
   private requestOf(task: TaskView, workspaceId?:string): TaskCreateRequest {
-    return {title:task.title,prompt:task.prompt,frequency:task.frequency,...(workspaceId?{workspaceId}:{}),notify:task.notify,...(task.endsAt!==undefined?{endsAt:task.endsAt}:{}),...(task.agentPreset?{agentPreset:task.agentPreset}:{}),...(task.model?{model:task.model}:{}),...(task.builtin?{builtin:true}:{})};
+    return {title:task.title,prompt:task.prompt,frequency:task.frequency,...(workspaceId?{workspaceId}:{}),notify:task.notify,...(task.endsAt!==undefined?{endsAt:task.endsAt}:{}),...(task.agentPreset?{agentPreset:task.agentPreset}:{}),...(task.model?{model:task.model}:{}),...(task.builtin?{builtin:true}:{}),sessionMode:task.sessionMode??'fixed'};
   }
 
   async deleteInactive(): Promise<number> {
@@ -493,12 +528,28 @@ export class ScheduleBridge {
     const entry = await this.findEntry(id);
     if (entry === undefined) throw new Error(`任务 ${id} 不存在`);
     if (entry.status !== "active") throw new Error("已结束的任务不可执行");
+    const requestId = `scheduled-send-${Date.now().toString(36)}-${entry.id.slice(-6)}`;
     await this.ctx.sessionController.prompt({
-      requestId: `scheduled-send-${Date.now().toString(36)}-${entry.id.slice(-6)}`,
+      requestId,
       sessionId: entry.sessionId,
       mode: "queue",
       content: [{ type: "text", text: entry.prompt }],
     }, new AbortController().signal);
+    // per-run：手动执行也是一次「用掉了这个会话」，同样轮转（否则下一次定时投递会追加到手动那次的会话里）。
+    // 手动执行没有官方投递回执，用 requestId 当幂等键。轮转失败不影响已投递的消息，只记录可见提示。
+    if (this.meta.get(entry.id)?.sessionMode !== "per-run" || !isRecurringRecord(entry)) return;
+    if (this.rotating.has(entry.id)) return;
+    this.rotating.add(entry.id);
+    try {
+      await this.rotateOne(entry, `manual:${requestId}`);
+      await this.refresh();
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      this.meta.set(entry.id, { rotateError: { at: Date.now(), message } });
+      this.ctx.logger?.warn?.(`[dsh-scheduled-send] 「${entry.title}」手动执行后新建会话失败：${message}`);
+    } finally {
+      this.rotating.delete(entry.id);
+    }
   }
 
   async history(request: TaskHistoryRequest): Promise<TaskHistoryPage> {
@@ -526,7 +577,21 @@ export class ScheduleBridge {
 
   private async findEntry(id: string): Promise<ScheduleCatalogEntryLike | undefined> {
     await this.refresh();
-    return this.catalogCache.find(entry => entry.id === id);
+    const direct = this.catalogCache.find(entry => entry.id === id);
+    if (direct !== undefined) return direct;
+    // 页面手里的 id 可能已被 per-run 轮转换掉（官方任务 id 由服务端分配）。
+    const rotated = this.rotatedTo.get(id);
+    return rotated === undefined ? undefined : this.catalogCache.find(entry => entry.id === rotated);
+  }
+
+  /** 记下轮转关系的 id 迁移（只保留最近若干条，避免长期运行无限增长）。 */
+  private rememberRotation(oldId: string, newId: string): void {
+    this.rotatedTo.set(oldId, newId);
+    while (this.rotatedTo.size > 200) {
+      const oldest = this.rotatedTo.keys().next();
+      if (oldest.done === true) break;
+      this.rotatedTo.delete(oldest.value);
+    }
   }
 
   private async resolveTarget(input: TaskCreateRequest): Promise<{
@@ -550,8 +615,12 @@ export class ScheduleBridge {
       ...(input.agentPreset === undefined || input.agentPreset === "" ? {} : { agentPreset: input.agentPreset }),
     });
     const title = input.title.trim();
+    // per-run：任务会话名带上建立时刻，一眼能分清「哪天的那个会话」（0.10.8）。
+    const sessionTitle = sessionModeFor(input) === "per-run"
+      ? perRunSessionTitle(title, Date.now())
+      : title;
     try {
-      await this.ctx.sessionController.rename({ sessionId: created.sessionId, title });
+      await this.ctx.sessionController.rename({ sessionId: created.sessionId, title: sessionTitle });
     } catch (e) {
       this.ctx.logger?.warn?.(`[dsh-scheduled-send] 任务会话命名失败（不影响调度）：${String((e as Error)?.message ?? e)}`);
     }
@@ -561,7 +630,7 @@ export class ScheduleBridge {
     return {
       sessionId: created.sessionId,
       workspaceId: input.workspaceId,
-      sessionTitle: title,
+      sessionTitle,
     };
   }
 
@@ -609,6 +678,31 @@ export class ScheduleBridge {
   }
 
   /**
+   * per-run 轮转走的会话（meta.lastRunSessionId）在出现真实轮次后挂回工作区。
+   * 与 reclaimSeat 同口径：只挂回、不建；找不到工作区就跳过。
+   */
+  private async reclaimRotatedSeat(sessionId: SessionId): Promise<void> {
+    const registry = this.ctx.workspaceRegistry;
+    if (registry?.get === undefined) return;
+    for (const id of this.meta.ids()) {
+      const meta = this.meta.get(id);
+      if (meta === undefined) continue;
+      if (meta.lastRunSessionId !== sessionId && meta.runSessionIds?.includes(sessionId) !== true) continue;
+      const entry = this.catalogCache.find(x => x.id === id);
+      const workspaceId = meta.workspaceId ?? (entry === undefined ? undefined : this.workspaceFor(this.toView(entry)));
+      if (workspaceId === undefined) continue;
+      const workspace = registry.get(workspaceId as WorkspaceId);
+      if (workspace === undefined) continue;
+      try {
+        await workspace.attachSession(sessionId);
+      } catch (e) {
+        this.ctx.logger?.warn?.(`[dsh-scheduled-send] 执行过的轮转会话挂回工作区失败（不影响调度）：${String((e as Error)?.message ?? e)}`);
+      }
+      return;
+    }
+  }
+
+  /**
    * 一次性迁移（0.10.7）：旧版本建的任务会话仍是工作区里的空白成员，继续会被
    * 「新会话」抢走。只处理「插件建过（meta 有 sessionTitle）且从未投递过」的会话；
    * 已投递的会话有真实轮次，既不会被复用，也不该被摘掉。
@@ -620,6 +714,192 @@ export class ScheduleBridge {
       if (entry.lastDelivery !== undefined || meta.lastExecution !== undefined) continue;
       await this.releaseSeat(entry.sessionId, this.workspaceFor(this.toView(entry)));
     }
+  }
+
+  /**
+   * per-run（0.10.8）：每次投递完成后把任务重指到一个新会话。
+   *
+   * 官方 Schedule 的任务行只存一个 `sessionId`，且公开 `update` **不能改绑定**
+   *（`ScheduleUpdateRequest` 只有 title/prompt/change，`expected` 里带 sessionId 只作身份校验；
+   * 见 `deepseek-harness/packages/schedule/schedule/src/types.ts:424` 与 `update.ts`）。
+   * 所以「重指」只能等价为「删旧建新」：轮转时建新会话 → 建新任务 → 删旧任务。
+   *
+   * 幂等：判据是官方 `lastDelivery.messageId`，已轮转过的那条记在 meta.rotatedFrom；
+   * 同一个 messageId 绝不轮转第二次（刷新由 UI 轮询/schedule/changed 反复触发，必须幂等）。
+   */
+  private async rotatePerRun(entries: readonly ScheduleCatalogEntryLike[]): Promise<boolean> {
+    let changed = false;
+    for (const entry of entries) {
+      if (this.stopped) return changed;
+      if (entry.status !== "active") continue;
+      // 一次性任务投递后即 inactive，没有「下一次」，不轮转。
+      if (!isRecurringRecord(entry)) continue;
+      if (this.meta.get(entry.id)?.sessionMode !== "per-run") continue;
+      const delivery = entry.lastDelivery;
+      if (delivery === undefined) continue;
+      const messageId = String(delivery.messageId ?? "");
+      if (messageId === "") continue;
+      if (this.meta.get(entry.id)?.rotatedFrom === messageId) continue;
+      // 刷新很频繁：同一次投递最多试 MAX_ROTATE_ATTEMPTS 次，避免失败时每 5 秒重建会话。
+      const attempts = this.meta.get(entry.id)?.rotateAttempts;
+      const tried = attempts?.messageId === messageId ? attempts.count : 0;
+      if (tried >= MAX_ROTATE_ATTEMPTS) continue;
+      if (this.rotating.has(entry.id)) continue;
+      this.rotating.add(entry.id);
+      try {
+        await this.rotateOne(entry, messageId);
+        changed = true;
+      } catch (error) {
+        const message = String((error as Error)?.message ?? error);
+        // 失败必须可见：任务留在原会话继续按周期执行，页面显示原因，不静默。
+        this.meta.set(entry.id, {
+          rotateError: { at: Date.now(), message },
+          rotateAttempts: { messageId, count: tried + 1 },
+        });
+        // 失败必须留痕：页面显示 rotateError，journal 里也要能查到（logger 在部分宿主组合里不存在）。
+        console.warn(`[dsh-scheduled-send] 「${entry.title}」新建会话失败，任务保持原会话（第 ${tried + 1} 次）：${message}`);
+      } finally {
+        this.rotating.delete(entry.id);
+      }
+    }
+    return changed;
+  }
+
+  /** 单个任务的轮转：新会话 → 新官方任务 → 删旧官方任务（先建后删 = 失败也不丢任务）。 */
+  private async rotateOne(entry: ScheduleCatalogEntryLike, messageId: string): Promise<void> {
+    const view = this.toView(entry);
+    const workspaceId = this.workspaceFor(view);
+    if (workspaceId === undefined) throw new Error("找不到任务所在工作区，无法新建会话");
+    const oldSessionId = String(entry.sessionId);
+    const newSession = await this.ctx.sessionController.create({
+      workspaceId: workspaceId as WorkspaceId,
+      ...(view.agentPreset === undefined || view.agentPreset === "" ? {} : { agentPreset: view.agentPreset }),
+    });
+    const newSessionId = newSession.sessionId;
+    const newTitle = perRunSessionTitle(entry.title, Date.now());
+    try {
+      await this.ctx.sessionController.rename({ sessionId: newSessionId, title: newTitle });
+    } catch (e) {
+      this.ctx.logger?.warn?.(`[dsh-scheduled-send] 轮转会话命名失败（不影响调度）：${String((e as Error)?.message ?? e)}`);
+    }
+    // 与首次建会话一致：新会话立即退席，避免被 web「新会话」当成可复用空白会话。
+    await this.releaseSeat(newSessionId, workspaceId);
+    if (view.model !== undefined) await this.applyModel(newSessionId, view.model);
+    // 半截交换标记：进程若在下面两步之间退出，下次刷新据此删掉旧任务（见 completePendingSwaps）。
+    this.meta.set(entry.id, { pendingSwap: { newSessionId: String(newSessionId), messageId, at: Date.now() } });
+    let created: ScheduleRecordLike;
+    try {
+      created = await this.ctx.schedule.create(
+        newSessionId,
+        toCreateRequest(frequencyOf(entry), entry.title, entry.prompt),
+      );
+    } catch (error) {
+      this.meta.set(entry.id, { pendingSwap: undefined });
+      throw new Error(`新建官方任务失败（原任务未改动）：${String((error as Error)?.message ?? error)}`);
+    }
+    this.meta.set(created.id, this.carriedMeta(entry, {
+      sessionTitle: newTitle,
+      lastRunSessionId: oldSessionId,
+      lastRunSessionTitle: view.sessionTitle,
+      rotatedFrom: messageId,
+    }));
+    try {
+      const deletion = await this.ctx.schedule.delete({ sessionId: oldSessionId as SessionId, id: entry.id });
+      if (deletion.deleted !== true) throw new Error(deletion.code ?? "未知原因");
+    } catch (error) {
+      // 删旧失败 → 回滚新增的那条，任务回到「原会话 + 原配置」，不留重复任务。
+      try {
+        await this.ctx.schedule.delete({ sessionId: newSessionId, id: created.id });
+      } catch { /* 回滚失败也要继续报告 */ }
+      this.meta.remove(created.id);
+      this.meta.set(entry.id, { pendingSwap: undefined });
+      throw new Error(`切换任务会话失败，已保留原任务：${String((error as Error)?.message ?? error)}`);
+    }
+    const next = this.meta.get(created.id);
+    if (next !== undefined) next.pendingSwap = undefined;
+    this.meta.remove(entry.id);
+    // 任务身份变了：预置基线/周期快照必须跟着改，否则「恢复默认」「归档迁移」认不到它。
+    this.protection.rebind(entry.id, created.id);
+    this.rememberRotation(entry.id, created.id);
+    console.log(`[dsh-scheduled-send] 「${entry.title}」已轮转到新会话：${newTitle}（上一次执行会话 ${oldSessionId}）`);
+  }
+
+  /**
+   * 收尾崩溃留下的半截交换：meta.pendingSwap 存在 = 上次「建新任务 → 删旧任务」没走完。
+   * 新任务已在官方表里就删旧任务；新任务不在（说明只写到了标记）就清标记，等下次投递重试。
+   */
+  private async completePendingSwaps(entries: readonly ScheduleCatalogEntryLike[]): Promise<boolean> {
+    let changed = false;
+    for (const entry of entries) {
+      const meta = this.meta.get(entry.id);
+      const pending = meta?.pendingSwap;
+      if (meta === undefined || pending === undefined || this.rotating.has(entry.id)) continue;
+      const next = entries.find(x => String(x.sessionId) === pending.newSessionId && x.title === entry.title);
+      if (next === undefined) {
+        this.meta.set(entry.id, { pendingSwap: undefined });
+        continue;
+      }
+      this.rotating.add(entry.id);
+      try {
+        const deletion = await this.ctx.schedule.delete({ sessionId: entry.sessionId as SessionId, id: entry.id });
+        if (deletion.deleted !== true) continue;
+        this.meta.set(next.id, {
+          ...this.carriedMeta(entry, {
+            sessionTitle: meta.sessionTitle,
+            lastRunSessionId: String(entry.sessionId),
+            lastRunSessionTitle: meta.lastRunSessionTitle,
+            rotatedFrom: pending.messageId,
+          }),
+          pendingSwap: undefined,
+        });
+        this.meta.remove(entry.id);
+        this.protection.rebind(entry.id, next.id);
+        this.rememberRotation(entry.id, next.id);
+        this.ctx.logger?.info?.(`[dsh-scheduled-send] 收尾未完成的会话轮转：「${entry.title}」`);
+        changed = true;
+      } catch (error) {
+        this.ctx.logger?.warn?.(`[dsh-scheduled-send] 收尾会话轮转失败（下次重试）：${String((error as Error)?.message ?? error)}`);
+      } finally {
+        this.rotating.delete(entry.id);
+      }
+    }
+    return changed;
+  }
+
+  /** 轮转后新任务继承的插件元数据（官方侧 title/prompt/规则由 create 重建）。 */
+  private carriedMeta(entry: ScheduleCatalogEntryLike, patch: Partial<TaskMeta>): Partial<TaskMeta> {
+    const prev = this.meta.get(entry.id) ?? this.meta.ensure(entry.id, { title: entry.title });
+    return {
+      notify: prev.notify,
+      createdAt: prev.createdAt,
+      title: entry.title,
+      ...(prev.workspaceId === undefined ? {} : { workspaceId: prev.workspaceId }),
+      ...(prev.endsAt === undefined ? {} : { endsAt: prev.endsAt }),
+      ...(prev.agentPreset === undefined ? {} : { agentPreset: prev.agentPreset }),
+      ...(prev.model === undefined ? {} : { model: prev.model }),
+      ...(prev.builtin === true ? { builtin: true } : {}),
+      ...(prev.lastExecution === undefined ? {} : { lastExecution: prev.lastExecution }),
+      sessionMode: "per-run",
+      lastRunAt: Date.now(),
+      runSessionIds: this.nextRunSessionIds(prev.runSessionIds, patch.lastRunSessionId),
+      ...patch,
+    };
+  }
+
+  /** per-run 执行过的会话列表（新的在前，去重，最多 20 条）。 */
+  private nextRunSessionIds(prev: readonly string[] | undefined, latest: string | undefined): string[] {
+    const ids = latest === undefined ? [...(prev ?? [])] : [latest, ...(prev ?? []).filter(x => x !== latest)];
+    return ids.slice(0, 20);
+  }
+
+  /** 官方行已不存在但仍需保留的元数据 id（轮转失败/半截交换）。 */
+  private keptMetaIds(): ReadonlySet<string> {
+    const keep = new Set<string>();
+    for (const id of this.meta.ids()) {
+      const meta = this.meta.get(id);
+      if (meta?.pendingSwap !== undefined || meta?.rotateError !== undefined) keep.add(id);
+    }
+    return keep;
   }
 
   /** 对目标会话应用模型；官方语义 = 同时更新全局默认模型（与手动切换一致）。失败即抛出，不建半坏任务。 */
@@ -652,6 +932,11 @@ export class ScheduleBridge {
       ...(meta.model === undefined ? {} : { model: meta.model }),
       ...(meta.builtin === true ? { builtin: true } : {}),
       createdAt: meta.createdAt,
+      sessionMode: meta.sessionMode === "per-run" ? "per-run" : "fixed",
+      ...(meta.lastRunSessionId === undefined ? {} : { lastRunSessionId: meta.lastRunSessionId }),
+      ...(meta.lastRunSessionTitle === undefined ? {} : { lastRunSessionTitle: meta.lastRunSessionTitle }),
+      ...(meta.lastRunAt === undefined ? {} : { lastRunAt: meta.lastRunAt }),
+      ...(meta.rotateError === undefined ? {} : { rotateError: meta.rotateError }),
       ...(entry.lastDelivery === undefined ? {} : { lastDelivery: receiptOf(entry.lastDelivery) }),
       ...(meta.lastExecution === undefined ? {} : { lastExecution: meta.lastExecution }),
     };
@@ -725,6 +1010,9 @@ export class ScheduleBridge {
       for (const entry of this.catalogCache) {
         if (entry.sessionId === sessionId) void this.reclaimSeat(sessionId, entry.id);
       }
+      // per-run 轮转走的那个会话（本次执行所在）同样要挂回，否则用户在工作区列表里看不到
+      // 每天那个会话，只能靠任务页跳转（0.10.8）。
+      void this.reclaimRotatedSeat(sessionId);
       return;
     }
     if (type === "user/message") {
@@ -823,6 +1111,11 @@ function toTimingChange(frequency: Frequency): NonNullable<ScheduleUpdateRequest
     case "cron": return { kind: "cron", cron: { expression: frequency.expression, time_zone: frequency.timeZone } };
     case "after": throw new Error("官方 Schedule 不支持把任务更新为相对延迟；请选择绝对时刻");
   }
+}
+
+/** 官方记录 → 是否周期任务（recurring 接受 {frequency}，这里给一个记录级封装）。 */
+function isRecurringRecord(record: Pick<ScheduleRecordLike, "kind"> & Record<string, unknown>): boolean {
+  return recurring({ frequency: frequencyOf(record) });
 }
 
 function frequencyOf(record: Pick<ScheduleRecordLike, "kind"> & Record<string, unknown>): Frequency {

@@ -36,4 +36,5 @@ export class ProtectionStore {
     writeFileSync(join(dir,Date.now()+'-'+Math.random().toString(36).slice(2)+'.json'),JSON.stringify({at:new Date().toISOString(),tasks,protection:this.data},null,2),{mode:0o600,flag:'wx'});
   }
 }
-export const recurring=(task: TaskView): boolean=>['every','daily','weekly','cron'].includes(task.frequency.kind);
+/** 周期任务判定（every/daily/weekly/cron）；入参只要带 frequency，TaskView 与官方行都能传。 */
+export const recurring=(task: {frequency: TaskView['frequency']}): boolean=>['every','daily','weekly','cron'].includes(task.frequency.kind);

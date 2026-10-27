@@ -4,7 +4,7 @@
  * 0.8.0：调度引擎改用宿主官方 `ctx.schedule`；本文件只负责 WorkBuddy 式表单、
  * 任务列表与输入区快捷入口。页面/表单/列表全部使用 DSH 主题 token。
  */
-import type { Frequency, TaskView } from "../shared/types.ts";
+import type { Frequency, SessionMode, TaskView } from "../shared/types.ts";
 import { isOneShotFrequency } from "../shared/types.ts";
 import { API_TIMEOUT_MS, REFRESH_MS } from "../shared/constants.ts";
 import { sessionMetaOf, type SessionMetaRow } from "../shared/session-meta.ts";
@@ -370,6 +370,8 @@ export function makeUI(React: unknown, _ctx: Ctx) {
     const [targetMode, setTargetMode] = useState<"new" | "existing">(p.task !== null ? "existing" : "new");
     const [sessionId, setSessionId] = useState<string>(p.task?.sessionId ?? "");
     const [presetId, setPresetId] = useState<string>(p.task?.agentPreset ?? "");
+    // 会话模式：per-run = 每次执行新建会话（周期任务才可选；单次任务恒为固定）。
+    const [sessionMode, setSessionMode] = useState<SessionMode>(p.task?.sessionMode ?? "fixed");
     const [modelKey, setModelKey] = useState<string>(
       p.task?.model === undefined ? "" : `${p.task.model.provider}|${p.task.model.model}`,
     );
@@ -448,6 +450,8 @@ export function makeUI(React: unknown, _ctx: Ctx) {
         providerName: modelOpt.providerName,
         modelName: modelOpt.modelName,
       };
+      // 单次任务只执行一次，轮转无意义：一律按固定会话提交（表单也已禁用开关并说明原因）。
+      const mode: SessionMode = frequency.kind === "once" || frequency.kind === "after" ? "fixed" : sessionMode;
       setBusy(true);
       try {
         if (editing) {
@@ -460,6 +464,7 @@ export function makeUI(React: unknown, _ctx: Ctx) {
               frequency,
               endsAt: endsAt ?? null,
               notify,
+              sessionMode: mode,
               ...(model !== undefined || p.task?.model !== undefined ? { model: model ?? null } : {}),
             }),
           });
@@ -476,6 +481,8 @@ export function makeUI(React: unknown, _ctx: Ctx) {
                 : { sessionId }),
               ...(endsAt === undefined ? {} : { endsAt }),
               ...(model === undefined ? {} : { model }),
+              // 未开启时不发字段：交给 Host 的缺省判定（builtin 采集类任务默认 per-run）。
+              ...(mode === "per-run" ? { sessionMode: mode } : {}),
               notify,
             }),
           });
@@ -491,6 +498,8 @@ export function makeUI(React: unknown, _ctx: Ctx) {
     };
 
     const sessionRows = p.getSessions?.() ?? [];
+    const recurringForm = kind !== "once";
+    const modeChecked = recurringForm && sessionMode === "per-run";
     const modelSelect = h("select", { className: "dss-sel", value: modelKey, onChange: (e: { target: { value: string } }) => setModelKey(e.target.value) },
       h("option", { value: "" }, "不指定（跟随会话现状 / 全局默认）"),
       models.list.map(m => h("option", { key: `${m.provider}|${m.model}`, value: `${m.provider}|${m.model}` }, `${m.providerName} · ${m.modelName}`)));
@@ -616,6 +625,18 @@ export function makeUI(React: unknown, _ctx: Ctx) {
                 : modelSelect,
             h("div", { className: "dss-note" }, "指定后在保存时应用到任务会话；与在会话里手动切换模型同链路，会同步更新全局默认模型。部分模型无工具/推理能力，请选择可执行的模型。")),
           h("label", { className: "dss-check" },
+            h("input", {
+              type: "checkbox",
+              checked: modeChecked,
+              disabled: !recurringForm,
+              onChange: (e: { target: { checked: boolean } }) => setSessionMode(e.target.checked ? "per-run" : "fixed"),
+            }),
+            h("span", null, "每次执行新建会话（日报/周报这类采集任务建议开）")),
+          h("div", { className: "dss-note" },
+            recurringForm
+              ? `开启后每次触发都会新建一个会话（命名「${(title.trim() === "" ? "任务名" : title.trim()).slice(0, 20)} · 日期 时间」），本次执行的历史留在它自己的会话里，互不污染；关闭 = 一直追加到同一个会话（${sessionMode === "per-run" ? "本次执行会话会从下一个周期起各自独立" : "固定会话"}）。`
+              : "单次任务只执行一次，固定使用同一个会话（没有「下一次」可轮转）。"),
+          h("label", { className: "dss-check" },
             h("input", { type: "checkbox", checked: notify, onChange: (e: { target: { checked: boolean } }) => setNotify(e.target.checked) }),
             h("span", null, "执行完成后推送状态（由 dsh-notify-alert 发送到已配置的企业微信 / WxPusher）")),
           h("div", { className: "dss-note" },
@@ -660,6 +681,8 @@ export function makeUI(React: unknown, _ctx: Ctx) {
         h("div", { className: "dss-card-title" },
           t.title,
           h("span", { className: `dss-badge ${tone}` }, active ? "待执行" : t.status==='paused'?'已暂停':'已结束'),
+          h("span", { className: `dss-badge ${t.sessionMode === "per-run" ? "dss-badge-schedule" : "dss-badge-ended"}` },
+            t.sessionMode === "per-run" ? "每次新建会话" : "固定会话"),
           last !== undefined
             ? h("span", { className: `dss-badge ${executionTone(last.status)}` }, `最近：${statusLabel(last.status)}`)
             : h("span", { className: "dss-badge dss-badge-ended" }, "尚未执行")),
@@ -668,9 +691,18 @@ export function makeUI(React: unknown, _ctx: Ctx) {
           h("span", null, frequencyLabel(t.frequency)),
           h("span", null, active ? `下次 ${fmtDateTime(t.scheduledAt)} · ${countdown(t.scheduledAt)}` : t.status==='paused'?'暂停期间不触发，恢复后按周期重新排期':'已结束'),
           t.endsAt !== undefined ? h("span", null, `截止 ${fmtDateTime(t.endsAt)}`) : null,
-          h("span", { title: t.sessionId }, `会话 ${t.sessionTitle ?? t.sessionId.slice(0, 12)}`),
+          h("span", { title: t.sessionId },
+            `${t.sessionMode === "per-run" ? "下次目标会话" : "会话"} ${t.sessionTitle ?? t.sessionId.slice(0, 12)}`),
+          t.sessionMode === "per-run" && t.lastRunSessionId !== undefined
+            ? h("span", { title: t.lastRunSessionId },
+                `本次执行会话 ${t.lastRunSessionTitle ?? t.lastRunSessionId.slice(0, 12)}`)
+            : null,
           t.model !== undefined ? h("span", { title: `${t.model.provider}/${t.model.model}` }, `模型 ${t.model.modelName ?? t.model.model}`) : null,
           t.lastDelivery !== undefined ? h("span", null, `最近投递 ${fmtDateTime(t.lastDelivery.deliveredAt)}`) : null),
+        t.rotateError !== undefined
+          ? h("div", { className: "dss-err", role: "alert" },
+              `新建会话失败（任务已保留在原会话，按原周期继续执行）：${t.rotateError.message}`)
+          : null,
         last !== undefined
           ? h("div", { className: "dss-note" },
               `${statusLabel(last.status)} · ${fmtDateTime(last.at)} · ${(last.durationMs / 1000).toFixed(1)}s`,
@@ -682,6 +714,9 @@ export function makeUI(React: unknown, _ctx: Ctx) {
         active ? h("button", { type: "button", className: "dss-btn-ghost", onClick: run }, "立即执行") : null,
         p.openSession !== undefined
           ? h("button", { type: "button", className: "dss-btn-ghost", onClick: () => { try { p.openSession?.(t.sessionId); } catch (e) { window.alert("打开会话失败：" + String((e as Error).message)); } } }, "打开会话")
+          : null,
+        p.openSession !== undefined && t.sessionMode === "per-run" && t.lastRunSessionId !== undefined
+          ? h("button", { type: "button", className: "dss-btn-ghost", onClick: () => { try { p.openSession?.(t.lastRunSessionId!); } catch (e) { window.alert("打开会话失败：" + String((e as Error).message)); } } }, "打开上次会话")
           : null,
         t.builtin===true
           ? (active||t.status==='paused'?h('button',{type:'button',className:'dss-btn-ghost',onClick:togglePause},t.status==='paused'?'恢复任务':'暂停任务'):null)

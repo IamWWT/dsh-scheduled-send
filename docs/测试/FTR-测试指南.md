@@ -3,8 +3,8 @@
 ## 当前状态
 
 - 文档性质：操作手册（分层测试与验收操作指南）
-- 对应版本：**v0.10.6**
-- 部署：**2026-10-27 已装生产**（`~/.dsh-dev/profiles/web`，17:22:50 重启）；
+- 对应版本：**v0.10.8**
+- 部署：**生产未装 0.10.8**（`~/.dsh-dev/profiles/web` 已装 0.10.7，**未重启**，3082 仍跑 0.10.6 模块图）；
   官方 `ui-schedule` 已在 profile patch 中 `disabled: true`——验收须断言页面「无自动化任务、有定时任务」
   （host `schedule` 服务不受影响）
 - 状态：有效（测试面对象 = `ScheduleBridge`（官方 schedule 服务控制面）+ `/tasks` 路由契约；
@@ -18,9 +18,10 @@
 ## 0. 命令速查
 
 ```bash
-pnpm check             # 全部离线测试：门禁构建 + host/client typecheck + 下 5 个测试脚本
+pnpm check             # 全部离线测试：门禁构建 + host/client typecheck + 下 6 个测试脚本
 pnpm test              # 离线单元测试（不含构建门禁/typecheck）
 node test/smoke-test.mjs             # ScheduleBridge 层（mock 官方 schedule/sessionController）
+node test/per-run-rotation-test.mjs  # 0.10.8 per-run 轮转（幂等/失败保留/半截交换自愈/fixed 不受影响）
 node test/routes-test.mjs            # HTTP 路由层（含 401 鉴权回归）
 node test/session-opener-test.mjs    # 「打开会话」跳转 helper（this 绑定）
 node test/session-meta-test.mjs      # 会话标题派生纯函数
@@ -46,6 +47,21 @@ node scripts/e2e-3082.mjs <base> --token <启动token> [--workspace <id>|--sessi
 | 删除 | 官方删除 + meta 行清掉（`reconcile` 对账一致） |
 | 参数校验 | 缺 title/prompt、非法 cron、非法星期 → 明确抛错，不落半坏任务 |
 | 有效期到期 | `endsAt` 到点 → 官方任务被 `delete`（分片定时器测试用短时限注入） |
+
+### 1.1b `test/per-run-rotation-test.mjs` — 每次执行新建会话（0.10.8）
+
+| 场景组 | 断言要点 |
+|---|---|
+| 模式缺省 | `builtin` 的日报/周报缺省 `per-run`；自定义任务 `fixed`；单次任务恒 `fixed`（显式 per-run 也被归一）；单次任务事后切 per-run → 报错 |
+| 首次会话 | per-run 会话名 = `任务名 · 本地日期时间`；建后即 `detachSession` |
+| 轮转 | 投递后新建会话 + 新官方任务（原配置 title/prompt/frequency 不变）+ 删旧任务；`endsAt/builtin/sessionMode` 继承；`lastRunSessionId` = 被轮转走的会话 |
+| 幂等 | 连续多次刷新不再建会话、不再删任务（同一 `messageId` 只轮转一次） |
+| 第二次投递 | 再轮转到第三个会话；三次执行 = 三个不同会话 |
+| fixed 不受影响 | 投递后不建会话、任务 id 与会话都不变 |
+| 失败保留 | 建会话失败 → 任务留在原会话 + `rotateError` 可见；同一次投递重试有上限（2 次） |
+| 删旧失败回滚 | 新任务被删掉、旧任务原样保留、无重复任务、`rotateError` 可见 |
+| 半截交换自愈 | 官方表里同时存在新旧两条 + `pendingSwap` 标记 → 刷新后只留新任务、继承执行会话、不重复轮转 |
+| 会话挂回 | 执行过的会话在 `turn/start` 后 `attachSession`；未执行的新会话保持退席 |
 
 ### 1.2 `test/routes-test.mjs` — HTTP 路由层
 
@@ -104,6 +120,16 @@ zh/en 文案与合并键。两插件契约改动必须两侧同时跑。
   创建后列表出现「验证任务/待执行」；console 零报错；清理临时任务。
 - 证据：同目录 `screenshots/01-main.png`…`04-task-created.png`、`web.log`（token URL）。
 
+## 2b. 隔离实例真跑：per-run 轮转（0.10.8，已执行）
+
+- 环境：`ops/validation/sched-per-run-20261028`（独立 `DSH_HOME=home2/`、127.0.0.1:**3088**、
+  仓内 pnpm store），profile 只装本插件 0.10.8 tgz；出货包与验证包逐字节一致（`cmp lib/index.js`）。
+- 复跑命令与断言明细见该目录 `README.md`；证据在 `evidence/`（`ship-*` 为出货包那一轮）。
+- 实测：`every 60s` 的 per-run 任务连跑两轮 → 会话 `97d6d9…`（01:43）与 `0ebd8c…`（01:44）各 1 次投递，
+  任务指向第三个未使用的 `8c5908…`（0 次投递、非工作区成员）；fixed 对照两轮都进 `b3db76…`。
+- ⚠️ 官方 `every_seconds` 最小 **60 秒**，无法用 10 秒间隔复现（这是宿主校验，不是插件限制）。
+- 隔离 home 无模型凭据：`turn/start` 正常、投递正常，模型执行 `failed`——本轮不验执行结果。
+
 ## 3. 端到端测试
 
 ### 3.1 API 端到端 `scripts/e2e-3082.mjs`（自动化，活实例）
@@ -127,6 +153,8 @@ delete → 列表恢复。只操作临时任务、不调 run、不投递真实�
 | 2 | 「添加定时任务」 | 弹窗六要素齐全：名称/提示词/频率/有效期/工作区/通知；「允许完全访问」为展示文案 |
 | 3 | 频率逐种试 | 单次/每天/每周/固定间隔/Cron 各有非法值即时提示（cron 空、星期未选等） |
 | 4 | 选工作区创建 | 该工作区出现以任务名命名的新会话；列表行显示会话链接 |
+| 4b | 勾选「每次执行新建会话」 | 任务行显示「每次新建会话」徽章 + 「本次执行会话 / 下次目标会话」；每次触发后「下次目标会话」换成新的时间戳会话，历史会话在侧栏可点开 |
+| 4c | 单次任务 | 开关为禁用态并说明「单次任务只执行一次，固定使用同一个会话」 |
 | 5 | 行操作 | 编辑（改频率生效）/ 立即执行（目标会话收到投递）/ 打开会话 / 删除（meta 同步清） |
 | 6 | 有效期 | 设一个近未来 `endsAt` → 到期后任务从官方列表消失、进入「已结束」折叠区 |
 | 7 | 输入框「⏰ 定时」 | 当前草稿建一次性任务；dock 行显示待触发预览 |

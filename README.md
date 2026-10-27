@@ -5,10 +5,10 @@ DSH 定时任务插件：给**提示词**设定发送计划（单次 / 每天 / 
 本插件不重写调度，只补官方没有的四件事——**管理表单、有效期、执行状态观察、通知联动**，
 并让「定时任务」页取代官方「自动化任务」入口。
 
-现行版本 **0.10.7**（任务会话不再占用工作区成员席位，修「新会话被任务标题命名」）；
-生产 `~/.dsh-dev/profiles/web` 现为 0.10.6（2026-10-27 17:22:50 重启；官方 `ui-schedule`
-已在 profile patch 中 `disabled`），0.10.7 待用户同意后安装重启；
-版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+现行版本 **0.10.8**（任务可选「每次执行新建会话」：日报/周报这类采集任务每天一个新会话；
+含 0.10.7 的任务会话退席修复）；生产 `~/.dsh-dev/profiles/web` 现为 0.10.7（**未重启**，
+3082 仍跑 0.10.6 的模块图；官方 `ui-schedule` 已在 profile patch 中 `disabled`），
+0.10.8 待用户同意后统一安装重启；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 效果预览
 
@@ -33,7 +33,12 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
   host 与官方 Schedule 状态）、一键清理已结束任务（`deleteInactive`）。
 - 创建/编辑弹窗字段：任务名称、提示词、频率（单次/每天/每周/固定间隔/Cron，时区默认本地）、
   有效期（长期有效 / 截止时刻）、**发送到**（新建任务会话 ⟂ 现有会话）、**Agent 模式**（preset，
-  仅新会话可选——现有会话首轮后锁定，只读展示）、**执行模型**、执行完成推送开关。
+  仅新会话可选——现有会话首轮后锁定，只读展示）、**执行模型**、**每次执行新建会话**开关、
+  执行完成推送开关。
+- 会话模式：`固定会话`（一直追加到同一个会话）⟂ `每次新建会话`（per-run）。周期任务每次触发后
+  自动轮转到一个新会话（命名「任务名 · 日期 时间」），历史各在自己的会话里；`builtin` 的
+  日报/周报/月报/年报缺省即开启。列表显示模式徽章 + 「本次执行会话 / 下次目标会话」，
+  per-run 另给「打开上次会话」。
 - 聊天输入框工具行「⏰ 定时」：把当前草稿一键排成一次性任务；输入框上方 dock **只展示本会话的一次性（未触发/未投递完成）任务**——周期任务（每天/每周/间隔/Cron）常驻 dock 会让会话越开越乱，一律只在左侧「定时任务」页查看与编辑。
 - 每行操作：编辑 / 立即执行（官方 `runNow` 投递）/ 打开会话 / 删除；展示最近执行结果与投递回执。
 
@@ -89,11 +94,11 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
 一律 **tgz 安装**（不用 link）；与 dsh-notify-alert ≥0.9.0 同装才有执行状态推送：
 
 ```bash
-pnpm check && npm pack        # 门禁构建 + 五组测试 + 打包 → dsh-scheduled-send-0.10.7.tgz
+pnpm check && npm pack        # 门禁构建 + 六组测试 + 打包 → dsh-scheduled-send-0.10.8.tgz
 
 # Ubuntu 源码版（CLI 不在 PATH；脚本默认 DSH_HOME=~/.dsh-dev、profile=web）
 DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
-  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.7.tgz --apply
+  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.8.tgz --apply
 
 # Windows 桌面版
 "<安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add <tgz 绝对路径>
@@ -128,7 +133,7 @@ pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --tok
 
 | 环境 | 支持度 | 验证状态 |
 |---|---|---|
-| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | 生产 `~/.dsh-dev/profiles/web` 现为 **0.10.6**（2026-10-27 17:22:50 重启运行）；0.9.5 时的 API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路已通过；**0.10.7 仅在隔离 home（`ops/validation/notify-naming-20261028`）验过，未装生产** |
+| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | 生产 `~/.dsh-dev/profiles/web` 已装 0.10.7 但**未重启**（3082 仍跑 0.10.6 模块图）；0.9.5 时的 API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路已通过；**0.10.8 只在隔离 home（`ops/validation/sched-per-run-20261028`，127.0.0.1:3088）做过真跑验证，未装生产** |
 | `windows-lite`（官方桌面版 profile `desktop`） | 全量 | **未在 Windows 实测**。调度跑在桌面 host 进程内，「离开电脑仍触发」前提是 dsh 进程保持运行；装完须**托盘退出后重开**才生效 |
 
 - 数据层：官方 `storages/schedule.json`（任务真身）+ `<stateDir>/tasks-meta.json`（插件元数据），
@@ -151,6 +156,7 @@ pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --tok
 | [docs/需求/BRD-业务需求说明书.md](docs/需求/BRD-业务需求说明书.md) | 需求记录（每轮反馈 → 设计决策 → 实现落点） |
 | [docs/需求/BRD-001-complete-feature.md](docs/需求/BRD-001-complete-feature.md) 等 SDD 三件套 | 首发/体验期历史记录（0.7.x 形态，非现行规格） |
 | [docs/测试/FTR-测试指南.md](docs/测试/FTR-测试指南.md) | 测试文档：单元 / 产物门禁 / e2e / 手工验收清单 |
+| [docs/管理/PP-20261028-每次执行新建会话.md](docs/管理/PP-20261028-每次执行新建会话.md) | 0.10.8 per-run 轮转设计与验收（含官方契约核对） |
 | [docs/管理/RMP-风险管理.md](docs/管理/RMP-风险管理.md) | 事故与排障记录 |
 | [docs/history/归档-20261013.md](docs/history/归档-20261013.md) | 历史归档（过期叙述原文，非现行手册） |
 | [AGENTS.md](AGENTS.md) | 本插件专属硬规则（inject、鉴权、门禁、版本同步） |
@@ -179,6 +185,24 @@ Bash/systemd 命令只适用于 `ubuntu-4090`。
 任务第一次真实投递（官方 schedule framing）或用户点「立即执行」后，插件把会话挂回工作区：
 此时它已有真实轮次，不可能再被复用，用户照旧能点开看历史。升级后首次启动会做一次迁移，
 把旧版本留下的「空白任务会话」也退出列表（只处理插件建过且从未投递过的会话）。
+
+## 每次执行新建会话（0.10.8）
+
+官方 Schedule 的任务行只存一个 `sessionId`，且公开 `update` **不能改绑定**
+（`ScheduleUpdateRequest` 只有 title/prompt/时间规则，sessionId 只作身份校验）。所以「每次新建会话」
+由本插件在一次投递之后做一次轮转：新建会话 → 命名「任务名 · 本地日期时间」→ 立即退席 →
+建新官方任务 → 删旧官方任务。判据是官方投递回执的 `messageId`（幂等，同一次投递只轮转一次），
+触发器是 `schedule/changed`（页面关闭也生效）+ 「立即执行」。
+
+- **先建后删**：删旧失败就回滚新增的那条，任务回到原会话，不留重复；进程若在两步之间退出，
+  下次刷新按 `pendingSwap` 标记收尾。
+- **失败不静默**：保留原任务继续按原周期执行，页面显示 `rotateError`；同一次投递最多重试 2 次
+  （刷新很频繁，避免每 5 秒重建会话）。
+- **执行过的会话挂回工作区**（`turn/start` 之后），未执行的新会话保持退席，不会被「新会话」抢走。
+- 代价：轮转后官方投递历史随旧任务行清空（`history()` 对新任务为空）；`every` 的下一跳按
+  「轮转时刻 + 间隔」重算（几十毫秒级偏差），`daily/weekly/cron` 无漂移。
+
+设计与证据见 [每次执行新建会话](docs/管理/PP-20261028-每次执行新建会话.md)。
 
 ## 周期任务与预置恢复（0.10.6）
 

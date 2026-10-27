@@ -29,6 +29,57 @@ export function isOneShotFrequency(frequency: Frequency): boolean {
   return frequency.kind === "once" || frequency.kind === "after";
 }
 
+/**
+ * 任务会话模式（0.10.8）：
+ *   - `fixed`：任务始终投递到同一个会话（官方默认语义，历史一直追加）。
+ *   - `per-run`：每次投递完成后，插件把任务重指到一个**全新会话**（轮转），
+ *     每次执行各在自己的会话里，互不污染。
+ *
+ * 官方 Schedule 的任务行只存一个 `sessionId`，也不提供「改绑定」的公开面，
+ * 因此 `per-run` 由本插件在观察到一次投递之后做一次
+ * 「建新会话 → 建新任务 → 删旧任务」的轮转，任务永远指向一个还没用过的会话。
+ * 实现见 host/bridge.ts 的 `rotatePerRun()`。
+ */
+export type SessionMode = "fixed" | "per-run";
+
+/** 采集类预置任务的标题特征（日报 / 周报 / 月报 / 年报）。 */
+export function isCollectionTaskTitle(title: string): boolean {
+  return /(日报|周报|月报|年报)/u.test(title);
+}
+
+/**
+ * 决定任务的会话模式（创建时缺省值的唯一判定处；Host 与 UI 共用）。
+ *
+ * 规则：显式给出就照办；单次任务（once/after）只投递一次，轮转无意义，一律 `fixed`；
+ * `builtin` 的采集类任务（日报/周报/月报/年报）默认 `per-run`。
+ */
+export function sessionModeFor(input: {
+  frequency: Frequency;
+  title?: string;
+  builtin?: boolean;
+  sessionMode?: SessionMode;
+}): SessionMode {
+  const explicit = input.sessionMode === "per-run" ? "per-run" : input.sessionMode === "fixed" ? "fixed" : undefined;
+  if (isOneShotFrequency(input.frequency)) return "fixed";
+  if (explicit !== undefined) return explicit;
+  if (input.builtin === true && isCollectionTaskTitle(input.title ?? "")) return "per-run";
+  return "fixed";
+}
+
+/**
+ * per-run 轮转出来的会话标题：`${任务名} · <本地日期时间>`。
+ * 例：`日报-每日日记收集 · 2026-10-28 09:00`（本地时区，分钟精度足够区分同日多次）。
+ */
+export function perRunSessionTitle(title: string, at: number): string {
+  const d = new Date(at);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const name = title.trim() === "" ? "定时任务" : title.trim();
+  // 别让极长任务名撑爆会话列表。
+  const head = name.length <= 80 ? name : `${name.slice(0, 79)}…`;
+  return `${head} · ${stamp}`;
+}
+
 /** 官方任务最近一次收件箱投递回执（不等于模型执行结果）。 */
 export interface DeliveryReceipt {
   scheduledAt: string;
@@ -87,6 +138,14 @@ export interface TaskView {
   builtin?: boolean;
   /** 插件记录的创建时刻（epoch ms）。 */
   createdAt: number;
+  /** 会话模式：`fixed`（一直追加到同一会话）或 `per-run`（每次执行新建会话）。 */
+  sessionMode: SessionMode;
+  /** per-run：本次执行（已投递过）的那个会话；`sessionId` 则是下次目标会话。 */
+  lastRunSessionId?: string;
+  lastRunSessionTitle?: string;
+  lastRunAt?: number;
+  /** per-run：最近一次轮转失败的原因（任务已保留在原会话，页面必须显示）。 */
+  rotateError?: { at: number; message: string };
   lastDelivery?: DeliveryReceipt;
   lastExecution?: ExecutionRecord;
 }
@@ -109,6 +168,11 @@ export interface TaskCreateRequest {
   model?: ModelRef;
   /** 标记为插件预置任务（页面「预置任务」tab）；缺省 = 用户自定义。 */
   builtin?: boolean;
+  /**
+   * 会话模式；缺省由 `sessionModeFor()` 归一（单次任务 fixed；
+   * builtin 的采集类任务 per-run；其余 fixed）。
+   */
+  sessionMode?: SessionMode;
 }
 
 /** 更新任务请求；所有字段可选，省略保留原值。 */
@@ -124,6 +188,8 @@ export interface TaskUpdateRequest {
   model?: ModelRef | null;
   /** 切换「预置 / 用户自定义」归属。 */
   builtin?: boolean;
+  /** 切换会话模式；单次任务不接受 per-run（报错，不静默改）。 */
+  sessionMode?: SessionMode;
 }
 
 /** 删除请求。 */
