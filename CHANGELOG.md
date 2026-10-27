@@ -1,3 +1,37 @@
+## 0.10.9 — 2026-10-28 跨轮转的投递/执行历史聚合视图
+
+0.10.8 的已知取舍：per-run 轮转 = 删旧任务建新任务，官方 `history()` 对新任务是空的，
+用户看不到跨轮转的投递/执行历史。本版补上等价视图。
+
+- 元数据新增**稳定任务键** `taskKey`（`tasks-meta.json` 的 `tasks.*.taskKey`）：创建时分配一次，
+  per-run 轮转、暂停/恢复、归档迁移、恢复默认都继承——官方 task id 会被轮转换掉，不能当聚合键。
+- 新增运行历史存储 `histories[taskKey] = { entries, dropped }`：每条含 `at`（本地时区展示）、
+  `sessionId` / `sessionTitle`（这次投递落在哪个会话）、`messageId`（投递回执；手动执行 =
+  `manual:<requestId>`）、`reason`（`scheduled` / `manual-run`）、`execution { status, durationMs,
+  summary, error }`。
+- 写入时机：官方投递回执一落地就记（**轮转之前**，记的是接收投递的会话）；「立即执行」也记一条；
+  `turn/end` 把执行结果按「会话 + FIFO」吸附到对应条目。**按 `messageId` 幂等**，轮转前后不重复。
+- 归因细节：定时投递有官方 framing（`source.kind='schedule'`）可归因；手动执行没有 framing，
+  改为登记「这个会话刚发起的手动请求」，把该会话下一个非 framing 的 `turn/end` 归给它，
+  所以手动执行也能显示执行成功/失败。
+- 顺序兜底：模型快速失败时执行结果可能早于「投递记录被刷新读到」，先缓冲再在投递记录落地时补吸附
+  （不会出现永远停在「投递成功」的行）。
+- 上限每任务 200 条（`RUN_HISTORY_LIMIT`），超出丢最旧 + `dropped` 计数，页面显示「已截断」。
+- 写元数据失败**不影响投递/轮转**：只写 console 与宿主 logger（journal 可查），历史留在内存里仍可读。
+- 新接口 `POST /api/scheduled-send/tasks/run-history`（同样过宿主鉴权）：倒序返回，默认 50 条，
+  附 `dropped/limit/total`；`TaskView` 增加 `runCount` / `historyTruncated` / `taskKey`。
+- 任务页每个任务新增「运行历史（N）」展开面板：时间倒序、状态徽章（投递成功/执行成功/执行失败/中断）、
+  会话标题 +「打开会话」、耗时/摘要/错误、手动执行标记；无记录时说明「官方历史在轮转时清空，
+  这里记等价信息」；`fixed` 任务另可看官方投递历史。`fixed` 与 `per-run` 一律记录。
+- 顺手修掉两处既有偏差（0.10.9 实测暴露,都不是本版新引入的语义）：
+  1. 执行状态写回：轮转掉的旧任务 id 曾被 `set()` 重新建行（写进一条无主元数据），
+     现在先按轮转映射把 id 归一到当前任务再写 `lastExecution`，历史吸附也随之找得对；
+  2. 元数据对账时刻：`reconcile` 的 `snapshotAt` 原本取在**读官方目录之后**，导致同一次刷新里
+     并发写完的元数据（`create()` 刚写的 `builtin`/`sessionMode`）被判成「官方已删」而删掉
+     （隔离实测 1/6 概率丢 `builtin`，归档迁移后就丢了预置归属）。改为在刷新入口取时刻。
+- 降级安全：`tasks-meta.json` 仍为 `version: 1`，0.10.8 读不认识的 `histories` 键会忽略；
+  回滚后运行历史不再增长，原有任务/调度行为不变。
+
 ## 0.10.8 — 2026-10-28 每次执行新建会话（per-run 轮转）
 
 用户要求（原话）：「日报-每日日记收集 任务会话 为什么会要绑定会话? 每天后续都有这个收集动作,

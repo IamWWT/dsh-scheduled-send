@@ -50,7 +50,8 @@
 ## 开发循环
 
 ```bash
-pnpm check   # 门禁构建 + host/client typecheck + 五组测试（smoke/routes/opener/meta/hooks）
+pnpm check   # 门禁构建 + host/client typecheck + 八组测试
+             # （smoke/per-run/routes/opener/meta/run-history/hooks/archive）
 pnpm e2e     # 对活实例：node scripts/e2e-3082.mjs [base] --token <t> [--workspace <id>]
 ```
 

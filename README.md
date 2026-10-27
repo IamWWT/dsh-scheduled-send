@@ -5,10 +5,10 @@ DSH 定时任务插件：给**提示词**设定发送计划（单次 / 每天 / 
 本插件不重写调度，只补官方没有的四件事——**管理表单、有效期、执行状态观察、通知联动**，
 并让「定时任务」页取代官方「自动化任务」入口。
 
-现行版本 **0.10.8**（任务可选「每次执行新建会话」：日报/周报这类采集任务每天一个新会话；
-含 0.10.7 的任务会话退席修复）；生产 `~/.dsh-dev/profiles/web` 现为 0.10.7（**未重启**，
+现行版本 **0.10.9**（任务页新增**跨轮转的运行历史**：每次投递落在哪个会话 + 该次执行结果，
+per-run 轮转、重启、任务 id 变化都不丢）；生产 `~/.dsh-dev/profiles/web` 现为 0.10.7（**未重启**，
 3082 仍跑 0.10.6 的模块图；官方 `ui-schedule` 已在 profile patch 中 `disabled`），
-0.10.8 待用户同意后统一安装重启；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+0.10.8/0.10.9 待用户同意后统一安装重启；版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 效果预览
 
@@ -41,6 +41,10 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
   per-run 另给「打开上次会话」。
 - 聊天输入框工具行「⏰ 定时」：把当前草稿一键排成一次性任务；输入框上方 dock **只展示本会话的一次性（未触发/未投递完成）任务**——周期任务（每天/每周/间隔/Cron）常驻 dock 会让会话越开越乱，一律只在左侧「定时任务」页查看与编辑。
 - 每行操作：编辑 / 立即执行（官方 `runNow` 投递）/ 打开会话 / 删除；展示最近执行结果与投递回执。
+- **运行历史**（0.10.9）：每行展开「运行历史（N）」列出按时间倒序的每次运行——本地时间、
+  状态（投递成功 / 执行成功 / 执行失败 / 中断）、会话标题与「打开会话」、耗时与摘要或错误，
+  手动执行单独标注。记录按**稳定任务键**聚合，per-run 轮转（官方删旧建新、`history()` 清空）
+  后仍连续；每任务最多 200 条，超出丢最旧并在页面说明已截断。`fixed` 任务另可一键查看官方投递历史。
 
 **调度与投递（全部复用官方）**
 
@@ -94,11 +98,11 @@ WorkBuddy 式创建表单（频率 / 有效期 / 目标会话 / Agent 模式 / �
 一律 **tgz 安装**（不用 link）；与 dsh-notify-alert ≥0.9.0 同装才有执行状态推送：
 
 ```bash
-pnpm check && npm pack        # 门禁构建 + 六组测试 + 打包 → dsh-scheduled-send-0.10.8.tgz
+pnpm check && npm pack        # 门禁构建 + 八组测试 + 打包 → dsh-scheduled-send-0.10.9.tgz
 
 # Ubuntu 源码版（CLI 不在 PATH；脚本默认 DSH_HOME=~/.dsh-dev、profile=web）
 DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
-  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.8.tgz --apply
+  dsh-plugins/dsh-scheduled-send/dsh-scheduled-send-0.10.9.tgz --apply
 
 # Windows 桌面版
 "<安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add <tgz 绝对路径>
@@ -113,7 +117,7 @@ DSH_CLI=<cli 绝对路径> ops/linux/install-plugin.sh \
 ## 构建与验证
 
 ```bash
-pnpm check              # 门禁构建 + host/client typecheck + 五组测试（smoke/routes/opener/meta/hooks）
+pnpm check              # 门禁构建 + host/client typecheck + 八组测试（smoke/per-run/routes/opener/meta/run-history/hooks/archive）
 pnpm typecheck          # tsc --noEmit（host + client）
 pnpm verify:installed   # 安装后验证（缺 lib/ / 扁平残留就地拦截）
 pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --token <启动token>
@@ -133,7 +137,7 @@ pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --tok
 
 | 环境 | 支持度 | 验证状态 |
 |---|---|---|
-| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | 生产 `~/.dsh-dev/profiles/web` 已装 0.10.7 但**未重启**（3082 仍跑 0.10.6 模块图）；0.9.5 时的 API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路已通过；**0.10.8 只在隔离 home（`ops/validation/sched-per-run-20261028`，127.0.0.1:3088）做过真跑验证，未装生产** |
+| `ubuntu-4090`（源码构建，127.0.0.1:3082 + CF Tunnel 公网） | 全量 | 生产 `~/.dsh-dev/profiles/web` 已装 0.10.7 但**未重启**（3082 仍跑 0.10.6 模块图）；0.9.5 时的 API e2e、Playwright UI、真实定时任务执行 + 微信推送全链路已通过；**0.10.8/0.10.9 只在隔离 home（`ops/validation/sched-per-run-20261028` 3088 / `ops/validation/sched-history-20261028` 3089）做过真跑验证，未装生产** |
 | `windows-lite`（官方桌面版 profile `desktop`） | 全量 | **未在 Windows 实测**。调度跑在桌面 host 进程内，「离开电脑仍触发」前提是 dsh 进程保持运行；装完须**托盘退出后重开**才生效 |
 
 - 数据层：官方 `storages/schedule.json`（任务真身）+ `<stateDir>/tasks-meta.json`（插件元数据），
@@ -157,6 +161,7 @@ pnpm e2e                # 端到端 API：node scripts/e2e-3082.mjs [base] --tok
 | [docs/需求/BRD-001-complete-feature.md](docs/需求/BRD-001-complete-feature.md) 等 SDD 三件套 | 首发/体验期历史记录（0.7.x 形态，非现行规格） |
 | [docs/测试/FTR-测试指南.md](docs/测试/FTR-测试指南.md) | 测试文档：单元 / 产物门禁 / e2e / 手工验收清单 |
 | [docs/管理/PP-20261028-每次执行新建会话.md](docs/管理/PP-20261028-每次执行新建会话.md) | 0.10.8 per-run 轮转设计与验收（含官方契约核对） |
+| [docs/管理/PP-20261028-跨轮转投递历史.md](docs/管理/PP-20261028-跨轮转投递历史.md) | 0.10.9 运行历史聚合视图（稳定任务键 / 上限 / 幂等 / 隔离验收） |
 | [docs/管理/RMP-风险管理.md](docs/管理/RMP-风险管理.md) | 事故与排障记录 |
 | [docs/history/归档-20261013.md](docs/history/归档-20261013.md) | 历史归档（过期叙述原文，非现行手册） |
 | [AGENTS.md](AGENTS.md) | 本插件专属硬规则（inject、鉴权、门禁、版本同步） |
@@ -186,6 +191,28 @@ Bash/systemd 命令只适用于 `ubuntu-4090`。
 此时它已有真实轮次，不可能再被复用，用户照旧能点开看历史。升级后首次启动会做一次迁移，
 把旧版本留下的「空白任务会话」也退出列表（只处理插件建过且从未投递过的会话）。
 
+## 跨轮转的投递/执行历史（0.10.9）
+
+per-run 轮转 = 删旧官方任务建新任务，于是官方 `history()` 对新任务是空的：用户看不到上一轮
+投递进了哪个会话、那次执行是成功还是失败。0.10.9 让插件自持一份等价记录。
+
+- **稳定任务键**：元数据里给每个任务分配 `taskKey`（`tasks-meta.json` 的 `taskKey` 字段），
+  轮转、暂停/恢复、归档迁移、恢复默认都继承它。运行历史按 `taskKey` 存（`tasks-meta.json`
+  的 `histories` 段），所以**跨轮转、跨重启、跨官方任务 id 变化**都连续。
+- **记录什么**：`at`（投递时刻，本地时区展示）、`sessionId` / `sessionTitle`（这次投递落在哪个
+  会话）、`messageId`（官方投递回执；手动执行 = `manual:<requestId>`）、`reason`
+  （`scheduled` / `manual-run`）、`execution { status, durationMs, summary, error }`（该次执行结果，
+  `turn/end` 归因后吸附到对应条目）。
+- **幂等**：按 `messageId` 去重——刷新很频繁（UI 5s 轮询 + `schedule/changed`），
+  同一次投递绝不写两条；轮转前后也只在轮转**之前**记一次（记的是接收投递的那个会话）。
+- **上限**：每任务 200 条（`RUN_HISTORY_LIMIT`），超出丢最旧并累加 `dropped`，页面显示「已截断」。
+- **失败不连坐**：写元数据失败只进 console/journal（`元数据写入失败：…`），投递与轮转照常完成。
+- 接口：`POST /api/scheduled-send/tasks/run-history {id, limit?}` → `{entries, dropped, limit, total}`
+  （倒序，默认 50 条）；列表接口只在 `TaskView` 里报 `runCount` / `historyTruncated`，
+  不把 200 条塞进轮询响应。
+
+设计与验收见 [跨轮转投递历史](docs/管理/PP-20261028-跨轮转投递历史.md)。
+
 ## 每次执行新建会话（0.10.8）
 
 官方 Schedule 的任务行只存一个 `sessionId`，且公开 `update` **不能改绑定**
@@ -199,8 +226,9 @@ Bash/systemd 命令只适用于 `ubuntu-4090`。
 - **失败不静默**：保留原任务继续按原周期执行，页面显示 `rotateError`；同一次投递最多重试 2 次
   （刷新很频繁，避免每 5 秒重建会话）。
 - **执行过的会话挂回工作区**（`turn/start` 之后），未执行的新会话保持退席，不会被「新会话」抢走。
-- 代价：轮转后官方投递历史随旧任务行清空（`history()` 对新任务为空）；`every` 的下一跳按
-  「轮转时刻 + 间隔」重算（几十毫秒级偏差），`daily/weekly/cron` 无漂移。
+- 代价：轮转后官方投递历史随旧任务行清空（`history()` 对新任务为空；0.10.9 起插件在元数据里
+  自持等价记录，见上一节）；`every` 的下一跳按「轮转时刻 + 间隔」重算（几十毫秒级偏差），
+  `daily/weekly/cron` 无漂移。
 
 设计与证据见 [每次执行新建会话](docs/管理/PP-20261028-每次执行新建会话.md)。
 

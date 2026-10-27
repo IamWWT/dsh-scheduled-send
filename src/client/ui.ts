@@ -4,9 +4,9 @@
  * 0.8.0：调度引擎改用宿主官方 `ctx.schedule`；本文件只负责 WorkBuddy 式表单、
  * 任务列表与输入区快捷入口。页面/表单/列表全部使用 DSH 主题 token。
  */
-import type { Frequency, SessionMode, TaskView } from "../shared/types.ts";
+import type { Frequency, RunHistoryEntry, SessionMode, TaskView } from "../shared/types.ts";
 import { isOneShotFrequency } from "../shared/types.ts";
-import { API_TIMEOUT_MS, REFRESH_MS } from "../shared/constants.ts";
+import { API_TIMEOUT_MS, REFRESH_MS, RUN_HISTORY_LIMIT } from "../shared/constants.ts";
 import { sessionMetaOf, type SessionMetaRow } from "../shared/session-meta.ts";
 
 interface Ctx {
@@ -78,6 +78,16 @@ interface ApiHealthResponse {
   version?: string;
   scheduleService?: boolean;
   active?: number;
+  total?: number;
+  error?: string;
+}
+
+interface ApiRunHistoryResponse {
+  ok: boolean;
+  version?: string;
+  entries?: RunHistoryEntry[];
+  dropped?: number;
+  limit?: number;
   total?: number;
   error?: string;
 }
@@ -185,6 +195,21 @@ function executionTone(status: string | undefined): string {
   return "dss-warn";
 }
 
+/**
+ * 运行历史一行的状态（0.10.9）。
+ *
+ * 区分用户的四个关心点：投递成功（还没跑完）/ 执行成功 / 执行失败 / 中断。
+ * `blocked`、`max-tokens` 这类归到「未正常完成」，仍标黄而不是静默成成功。
+ */
+function runStateOf(e: RunHistoryEntry): { label: string; tone: string } {
+  const status = e.execution?.status;
+  if (status === undefined) return { label: "投递成功", tone: "dss-muted" };
+  if (status === "success") return { label: "执行成功", tone: "dss-ok" };
+  if (status === "failed") return { label: "执行失败", tone: "dss-err" };
+  if (status === "aborted" || status === "interrupted") return { label: "中断", tone: "dss-warn" };
+  return { label: statusLabel(status), tone: "dss-warn" };
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
@@ -255,6 +280,16 @@ const CSS = `
 .dss-badge-fail{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
 .dss-badge-warn{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary)}
 .dss-empty{border:0.5px dashed var(--dsw-alias-border-l2);border-radius:12px;padding:28px 16px;text-align:center;color:var(--dsw-alias-label-secondary);font-size:13px}
+.dss-runs{display:flex;flex-direction:column;gap:4px;margin-top:2px}
+.dss-runs-body{display:flex;flex-direction:column;gap:6px;border-left:2px solid var(--dsw-alias-border-l2);padding:6px 0 2px 10px;margin-top:2px}
+.dss-runs-list{display:flex;flex-direction:column;gap:6px}
+.dss-run{display:flex;flex-direction:column;gap:2px;padding:5px 8px;border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
+.dss-run-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
+.dss-run-time{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
+.dss-run-session{color:var(--dsw-alias-label-secondary);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dss-run-summary{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dss-runs-open{padding:1px 8px;min-height:22px;font-size:11px}
+.dss-runs-official{display:flex;flex-direction:column;gap:4px;border-top:0.5px solid var(--dsw-alias-border-l2);padding-top:6px;margin-top:2px}
 .dss-group-head{display:flex;align-items:center;gap:8px;padding:8px 2px;border:0;border-bottom:0.5px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;width:100%;text-align:left}
 .dss-group-head:hover{color:var(--dsw-alias-brand-primary)}
 .dss-input,.dss-sel,.dss-textarea{box-sizing:border-box;width:100%;background:var(--dsw-alias-bg-layer-2);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;padding:8px 10px;font-size:13px;color:var(--dsw-alias-label-primary);font-family:inherit;min-height:36px}
@@ -676,6 +711,62 @@ export function makeUI(React: unknown, _ctx: Ctx) {
       void api('/tasks/'+(t.status==='paused'?'resume':'pause'),{method:'POST',body:JSON.stringify({id:t.id})})
         .then(p.onRefresh).catch(e=>window.alert('操作失败：'+String((e as Error).message)));
     };
+    // 运行历史面板（0.10.9）：按需拉取，不跟着 5 秒轮询刷新，避免列表接口被历史撑大。
+    const [runsOpen, setRunsOpen] = useState(false);
+    const [runs, setRuns] = useState<{ entries: RunHistoryEntry[]; dropped: number; limit: number; total: number } | null>(null);
+    const [runsLoading, setRunsLoading] = useState(false);
+    const [runsError, setRunsError] = useState<string | null>(null);
+    const [official, setOfficial] = useState<{ deliveredAt: string; messageId: string }[] | null>(null);
+    const loadRuns = (): void => {
+      setRunsLoading(true);
+      void api<ApiRunHistoryResponse>("/tasks/run-history", { method: "POST", body: JSON.stringify({ id: t.id }) })
+        .then(r => {
+          setRuns({
+            entries: Array.isArray(r.entries) ? r.entries : [],
+            dropped: typeof r.dropped === "number" ? r.dropped : 0,
+            limit: typeof r.limit === "number" ? r.limit : RUN_HISTORY_LIMIT,
+            total: typeof r.total === "number" ? r.total : 0,
+          });
+          setRunsError(null);
+        })
+        .catch((e: unknown) => setRunsError(String((e as Error)?.message ?? e)))
+        .finally(() => setRunsLoading(false));
+    };
+    const toggleRuns = (): void => {
+      const next = !runsOpen;
+      setRunsOpen(next);
+      if (next) loadRuns();
+    };
+    const loadOfficial = (): void => {
+      void api<{ records?: Array<{ deliveredAt: string; messageId: string }> }>("/tasks/history", {
+        method: "POST",
+        body: JSON.stringify({ id: t.id, sessionId: t.sessionId, limit: 20 }),
+      })
+        .then(r => setOfficial(Array.isArray(r.records) ? r.records : []))
+        .catch((e: unknown) => window.alert("读取官方投递历史失败：" + String((e as Error).message)));
+    };
+    const runRows = (runs?.entries ?? []).map((e, i) => {
+      const state = runStateOf(e);
+      return h("div", { className: "dss-run", key: `${e.messageId}-${i}` },
+        h("div", { className: "dss-run-line" },
+          h("span", { className: "dss-run-time" }, fmtDateTime(e.at)),
+          h("span", { className: state.tone }, state.label),
+          e.reason === "manual-run" ? h("span", { className: "dss-badge dss-badge-ended" }, "手动执行") : null,
+          h("span", { className: "dss-run-session", title: e.sessionId }, e.sessionTitle ?? e.sessionId.slice(0, 12)),
+          e.execution !== undefined ? h("span", { className: "dss-muted" }, `${(e.execution.durationMs / 1000).toFixed(1)}s`) : null,
+          p.openSession !== undefined
+            ? h("button", {
+                type: "button", className: "dss-btn-ghost dss-runs-open",
+                onClick: () => { try { p.openSession?.(e.sessionId); } catch (err) { window.alert("打开会话失败：" + String((err as Error).message)); } },
+              }, "打开会话")
+            : null),
+        e.execution?.error !== undefined
+          ? h("div", { className: "dss-err" }, e.execution.error)
+          : null,
+        e.execution?.summary !== undefined
+          ? h("div", { className: "dss-note dss-run-summary" }, e.execution.summary)
+          : null);
+    });
     return h("div", { className: "dss-card" },
       h("div", { className: "dss-card-main" },
         h("div", { className: "dss-card-title" },
@@ -708,7 +799,44 @@ export function makeUI(React: unknown, _ctx: Ctx) {
               `${statusLabel(last.status)} · ${fmtDateTime(last.at)} · ${(last.durationMs / 1000).toFixed(1)}s`,
               last.error !== undefined ? ` · ${last.error}` : "",
               last.summary !== undefined ? h("div", { style: { marginTop: 2 } }, last.summary) : null)
-          : null),
+          : null,
+        // 运行历史入口（0.10.9）：per-run 轮转会清空官方投递历史，这里是等价记录。
+        h("div", { className: "dss-runs" },
+          h("div", { className: "dss-inline", style: { gap: 6 } },
+            h("button", { type: "button", className: "dss-btn-ghost", onClick: toggleRuns },
+              `${runsOpen ? "收起运行历史" : "运行历史"}（${t.runCount}${t.historyTruncated === true ? "+" : ""}）`),
+            t.historyTruncated === true
+              ? h("span", { className: "dss-warn" }, `已截断：更早的记录已丢弃（每任务最多 ${RUN_HISTORY_LIMIT} 条）`)
+              : null,
+            t.sessionMode !== "per-run" && active
+              ? h("button", { type: "button", className: "dss-btn-ghost", onClick: loadOfficial },
+                  official === null ? "另看官方投递历史" : "刷新官方投递历史")
+              : null),
+          runsOpen
+            ? h("div", { className: "dss-runs-body" },
+                runsLoading && runs === null ? h("div", { className: "dss-muted" }, "读取运行历史…") : null,
+                runsError !== null ? h("div", { className: "dss-err", role: "alert" }, `读取运行历史失败：${runsError}`) : null,
+                runs !== null && runs.entries.length === 0
+                  ? h("div", { className: "dss-note" },
+                      "暂无运行记录。官方投递历史在「每次执行新建会话」轮转（删旧任务建新任务）时会一起清空；",
+                      "这里记录等价信息：每次投递落在哪个会话（可点开）+ 该次执行结果。任务第一次触发后就会出现在这里。")
+                  : null,
+                runRows.length > 0 ? h("div", { className: "dss-runs-list" }, ...runRows) : null,
+                runs !== null && runs.dropped > 0
+                  ? h("div", { className: "dss-warn" },
+                      `已截断：更早的 ${runs.dropped} 条已丢弃（每任务最多保留 ${runs.limit} 条）`)
+                  : null,
+                official !== null
+                  ? h("div", { className: "dss-runs-official" },
+                      h("div", { className: "dss-muted" }, `官方投递历史（${official.length} 条，仅当前任务行）`),
+                      official.length === 0
+                        ? h("div", { className: "dss-note" }, "官方当前任务还没有投递记录（重建过的任务行历史为空）。")
+                        : official.map((r, i) => h("div", { className: "dss-run-line", key: `${r.messageId}-${i}` },
+                            h("span", { className: "dss-run-time" }, fmtDateTime(r.deliveredAt)),
+                            h("span", { className: "dss-muted" }, r.messageId))))
+                  : null,
+                h("div", { className: "dss-note" }, "记录存在插件元数据里（tasks-meta.json），跨轮转、跨重启保留；任务删除后清掉。"))
+            : null)),
       h("div", { className: "dss-card-actions" },
         active ? h("button", { type: "button", className: "dss-btn-ghost", onClick: p.onEdit }, "编辑") : null,
         active ? h("button", { type: "button", className: "dss-btn-ghost", onClick: run }, "立即执行") : null,

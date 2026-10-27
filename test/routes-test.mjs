@@ -166,6 +166,27 @@ function invoke(path, opts = {}) {
   assert.equal(body.records.length, 1);
 }
 
+// 6b) 插件自持运行历史（0.10.9）：POST 参数校验 + 形状；手动执行会记一条
+{
+  const { status, body } = await invoke("/tasks/run-history", { method: "POST", json: { id: "s-1", limit: 10 } });
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.limit, 200, "返回每任务上限");
+  assert.ok(Array.isArray(body.entries));
+  assert.equal(body.entries.length, 1, "第 5 步的「立即执行」应留下 1 条运行记录");
+  assert.equal(body.entries[0].reason, "manual-run");
+  assert.match(String(body.entries[0].messageId), /^manual:/u);
+  assert.equal(body.dropped, 0);
+
+  const missingId = await invoke("/tasks/run-history", { method: "POST", json: {} });
+  assert.equal(missingId.status, 400);
+  const wrongMethod = await invoke("/tasks/run-history", { method: "GET" });
+  assert.equal(wrongMethod.status, 405);
+  const unknownTask = await invoke("/tasks/run-history", { method: "POST", json: { id: "no-such-task" } });
+  assert.equal(unknownTask.body.ok, false);
+  assert.match(String(unknownTask.body.error), /不存在/u);
+}
+
 // 7) 删除 + 清理已结束
 {
   const del = await invoke("/tasks/delete", { method: "POST", json: { id: "s-1" } });

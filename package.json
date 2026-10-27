@@ -1,6 +1,6 @@
 {
   "name": "dsh-scheduled-send",
-  "version": "0.10.8",
+  "version": "0.10.9",
   "description": "DSH 定时任务：复用官方 Schedule 服务，提供 WorkBuddy 式提示词定时表单、任务会话、截止时间与执行状态；通知联动 dsh-notify-alert。",
   "keywords": [
     "dsh",
@@ -34,9 +34,9 @@
   "scripts": {
     "build": "node scripts/build.mjs --no-typecheck",
     "build:full": "node scripts/build.mjs",
-    "check": "node scripts/build.mjs && node test/smoke-test.mjs && node test/per-run-rotation-test.mjs && node test/routes-test.mjs && node test/session-opener-test.mjs && node test/session-meta-test.mjs && node test/ui-hooks-regression-test.mjs && node test/archive-preservation-test.mjs",
+    "check": "node scripts/build.mjs && node test/smoke-test.mjs && node test/per-run-rotation-test.mjs && node test/routes-test.mjs && node test/session-opener-test.mjs && node test/session-meta-test.mjs && node test/run-history-test.mjs && node test/ui-hooks-regression-test.mjs && node test/archive-preservation-test.mjs",
     "typecheck": "node scripts/typecheck.mjs",
-    "test": "node test/smoke-test.mjs && node test/per-run-rotation-test.mjs && node test/routes-test.mjs && node test/session-opener-test.mjs && node test/session-meta-test.mjs && node test/ui-hooks-regression-test.mjs && node test/archive-preservation-test.mjs",
+    "test": "node test/smoke-test.mjs && node test/per-run-rotation-test.mjs && node test/routes-test.mjs && node test/session-opener-test.mjs && node test/session-meta-test.mjs && node test/run-history-test.mjs && node test/ui-hooks-regression-test.mjs && node test/archive-preservation-test.mjs",
     "pack": "npm pack",
     "verify:installed": "node scripts/verify-installed.mjs",
     "install:dev": "bash scripts/install-to-dsh.sh",
@@ -46,7 +46,8 @@
     "test:opener": "node test/session-opener-test.mjs",
     "test:meta": "node test/session-meta-test.mjs",
     "test:hooks": "node test/ui-hooks-regression-test.mjs",
-    "test:per-run": "node test/per-run-rotation-test.mjs"
+    "test:per-run": "node test/per-run-rotation-test.mjs",
+    "test:history": "node test/run-history-test.mjs"
   },
   "dsh": {
     "bundle": {

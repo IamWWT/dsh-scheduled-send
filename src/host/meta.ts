@@ -8,14 +8,18 @@
  *   - lastExecution：最近一次模型执行结果（官方只记录“投递”，不记录执行）；
  *   - sessionMode / lastRunSessionId / rotatedFrom / pendingSwap：per-run（每次执行新建会话）
  *     的轮转状态，其中 rotatedFrom 是**幂等键**（同一次投递只轮转一次），
- *     pendingSwap 用于进程在「建新任务 → 删旧任务」之间退出时的自愈。
+ *     pendingSwap 用于进程在「建新任务 → 删旧任务」之间退出时的自愈；
+ *   - taskKey + histories（0.10.9）：每个任务一条**稳定业务身份**与最近 200 次
+ *     「投递 + 执行」记录。官方任务 id 会被 per-run 轮转换掉，所以运行历史按 taskKey
+ *     存（轮转时继承），不按官方 id 存。
  *
  * 元数据是**附属信息**：官方任务行才是权威。读不到/写失败时页面仍可显示官方任务，
  * 只是少了截止时间/执行结果。写入使用临时文件 + rename，避免半截 JSON。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { ExecutionRecord, ModelRef, SessionMode } from "../shared/types.ts";
+import { RUN_HISTORY_LIMIT } from "../shared/constants.ts";
+import type { ExecutionRecord, ModelRef, RunHistoryEntry, RunReason, SessionMode } from "../shared/types.ts";
 
 /**
  * 半截交换标记（0.10.8 per-run 轮转的崩溃自愈用）。
@@ -34,6 +38,12 @@ export interface PendingSwap {
 
 export interface TaskMeta {
   notify: boolean;
+  /**
+   * 稳定业务身份（0.10.9）：per-run 轮转时继承给新任务，运行历史按它聚合。
+   *
+   * 官方 task id 由服务端分配、轮转必变，不能当聚合键；`taskKey` 一旦分配就不再变。
+   */
+  taskKey?: string;
   endsAt?: number;
   workspaceId?: string;
   sessionTitle?: string;
@@ -75,11 +85,30 @@ export interface TaskMeta {
 interface MetaFile {
   version: 1;
   tasks: Record<string, TaskMeta>;
+  /**
+   * 每任务运行历史（0.10.9）：键 = `TaskMeta.taskKey`，不随官方任务 id 轮转。
+   * 保持 `version: 1` 是刻意的——旧版（0.10.8 及更早）读元数据时只认 version 并忽略多余键，
+   * 降级不会因为多了这个字段就把整份元数据判成损坏。
+   */
+  histories?: Record<string, RunHistoryRecord>;
+}
+
+/** 单个任务的运行历史容器。 */
+export interface RunHistoryRecord {
+  /** 时间倒序（新的在前）。 */
+  entries: RunHistoryEntry[];
+  /** 超上限被丢弃的条数（页面用来提示「已截断」）。 */
+  dropped: number;
+}
+
+/** 分配一个稳定任务键（一次分配，轮转继承）。 */
+export function newTaskKey(): string {
+  return `tk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export class MetaStore {
   private readonly file: string;
-  private data: MetaFile = { version: 1, tasks: {} };
+  private data: MetaFile = { version: 1, tasks: {}, histories: {} };
   /**
    * 每个 id 最近一次被写入的时刻（内存态，不落盘）。
    *
@@ -101,11 +130,15 @@ export class MetaStore {
       const raw = JSON.parse(readFileSync(this.file, "utf-8")) as Partial<MetaFile>;
       if (raw.version !== 1 || typeof raw.tasks !== "object" || raw.tasks === null) return;
       const tasks: Record<string, TaskMeta> = {};
+      let assignedKey = false;
       for (const [id, value] of Object.entries(raw.tasks)) {
         if (typeof value !== "object" || value === null) continue;
         const v = value as Partial<TaskMeta>;
+        const taskKey = typeof v.taskKey === "string" && v.taskKey !== "" ? v.taskKey : newTaskKey();
+        if (typeof v.taskKey !== "string" || v.taskKey === "") assignedKey = true;
         tasks[id] = {
           notify: v.notify !== false,
+          taskKey,
           ...(typeof v.endsAt === "number" && Number.isFinite(v.endsAt) ? { endsAt: v.endsAt } : {}),
           ...(typeof v.workspaceId === "string" && v.workspaceId !== "" ? { workspaceId: v.workspaceId } : {}),
           ...(typeof v.sessionTitle === "string" && v.sessionTitle !== "" ? { sessionTitle: v.sessionTitle } : {}),
@@ -128,10 +161,27 @@ export class MetaStore {
           ...(isExecutionRecord(v.lastExecution) ? { lastExecution: v.lastExecution } : {}),
         };
       }
-      this.data = { version: 1, tasks };
+      // 运行历史：逐条按结构校验后再收（损坏的单条丢弃，不连坐整份文件）。
+      const histories: Record<string, RunHistoryRecord> = {};
+      if (typeof raw.histories === "object" && raw.histories !== null) {
+        for (const [key, value] of Object.entries(raw.histories)) {
+          if (typeof key !== "string" || key === "") continue;
+          const v = value as Partial<RunHistoryRecord> | undefined;
+          const entries = Array.isArray(v?.entries)
+            ? v.entries.filter(isRunHistoryEntry).sort((a, b) => b.at - a.at).slice(0, RUN_HISTORY_LIMIT)
+            : [];
+          const dropped = typeof v?.dropped === "number" && Number.isFinite(v.dropped) && v.dropped > 0
+            ? Math.floor(v.dropped)
+            : 0;
+          if (entries.length > 0 || dropped > 0) histories[key] = { entries, dropped };
+        }
+      }
+      this.data = { version: 1, tasks, histories };
+      // 老元数据（0.10.8 及更早）没有 taskKey：升级后首次启动补一次并落盘（只补不删）。
+      if (assignedKey) this.save();
     } catch {
       // 损坏的元数据不阻断插件：官方任务仍可用，页面退化为无附加信息。
-      this.data = { version: 1, tasks: {} };
+      this.data = { version: 1, tasks: {}, histories: {} };
     }
   }
 
@@ -156,6 +206,7 @@ export class MetaStore {
     if (existing !== undefined) return existing;
     const created: TaskMeta = {
       notify: defaults.notify !== false,
+      taskKey: defaults.taskKey ?? newTaskKey(),
       createdAt: defaults.createdAt ?? Date.now(),
       ...(defaults.endsAt === undefined ? {} : { endsAt: defaults.endsAt }),
       ...(defaults.workspaceId === undefined ? {} : { workspaceId: defaults.workspaceId }),
@@ -211,6 +262,69 @@ export class MetaStore {
   }
 
   /**
+   * 取某个任务键的运行历史（新的在前）。返回浅拷贝，调用方改数组不会污染存储。
+   */
+  historyOf(taskKey: string | undefined): RunHistoryRecord {
+    if (taskKey === undefined) return { entries: [], dropped: 0 };
+    const record = this.data.histories?.[taskKey];
+    if (record === undefined) return { entries: [], dropped: 0 };
+    return { entries: [...record.entries], dropped: record.dropped };
+  }
+
+  /**
+   * 追加一条运行记录并落盘。返回 `false` = 按 `messageId` 判定为重复（幂等，不写第二遍）。
+   *
+   * 上限：超过 `RUN_HISTORY_LIMIT` 丢最旧的那条，并把丢弃数累加进 `dropped`（页面提示「已截断」）。
+   */
+  appendRun(taskKey: string, entry: RunHistoryEntry): boolean {
+    const histories = this.data.histories ?? {};
+    this.data.histories = histories;
+    const record = histories[taskKey] ?? { entries: [], dropped: 0 };
+    if (record.entries.some(x => x.messageId === entry.messageId)) return false;
+    record.entries.unshift(entry);
+    if (record.entries.length > RUN_HISTORY_LIMIT) {
+      record.dropped += record.entries.length - RUN_HISTORY_LIMIT;
+      record.entries.length = RUN_HISTORY_LIMIT;
+    }
+    histories[taskKey] = record;
+    this.save();
+    return true;
+  }
+
+  /**
+   * 把执行结果吸附到对应运行记录上（按会话 + FIFO：同会话里最早那条还没结果的就是这轮）。
+   *
+   * 只更新、不新建：历史条目由「投递」驱动（官方回执 / 手动执行），执行事件晚到。
+   * 找不到对应条目 = 这条执行不属于本插件记录的某次投递（例如插件重启前投递的），返回 false。
+   */
+  attachExecution(taskKey: string | undefined, sessionId: string, execution: ExecutionRecord): boolean {
+    if (taskKey === undefined) return false;
+    const record = this.data.histories?.[taskKey];
+    if (record === undefined) return false;
+    for (let i = record.entries.length - 1; i >= 0; i -= 1) {
+      const item = record.entries[i];
+      if (item.sessionId !== sessionId || item.execution !== undefined) continue;
+      record.entries[i] = { ...item, execution };
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  /** 丢弃已经没有任何任务行的运行历史（任务被删除/清理已结束后）。 */
+  pruneHistories(liveKeys: ReadonlySet<string>): void {
+    const histories = this.data.histories;
+    if (histories === undefined) return;
+    let changed = false;
+    for (const key of Object.keys(histories)) {
+      if (liveKeys.has(key)) continue;
+      delete histories[key];
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  /**
    * 删除官方任务表里已经不存在的元数据（官方 delete/deleteInactive 后）。
    *
    * `keep`：即使官方行已不存在也要留的 id（per-run 轮转失败时任务行已删，
@@ -231,8 +345,20 @@ export class MetaStore {
   }
 }
 
-function isRotateError(value: unknown): value is { at: number; message: string } {
+function isRunHistoryEntry(value: unknown): value is RunHistoryEntry {
   if (typeof value !== "object" || value === null) return false;
+  const v = value as Partial<RunHistoryEntry>;
+  if (typeof v.at !== "number" || !Number.isFinite(v.at)) return false;
+  if (typeof v.sessionId !== "string" || v.sessionId === "") return false;
+  if (typeof v.messageId !== "string" || v.messageId === "") return false;
+  const reason: RunReason | undefined = v.reason === "scheduled" ? "scheduled" : v.reason === "manual-run" ? "manual-run" : undefined;
+  if (reason === undefined) return false;
+  if (v.sessionTitle !== undefined && typeof v.sessionTitle !== "string") return false;
+  if (v.execution !== undefined && !isExecutionRecord(v.execution)) return false;
+  return true;
+}
+
+function isRotateError(value: unknown): value is { at: number; message: string } {  if (typeof value !== "object" || value === null) return false;
   const v = value as { at?: unknown; message?: unknown };
   return typeof v.at === "number" && Number.isFinite(v.at) && typeof v.message === "string" && v.message !== "";
 }

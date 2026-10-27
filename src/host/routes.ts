@@ -8,7 +8,8 @@
  *   POST tasks/delete           删除任务
  *   POST tasks/delete-inactive  清除全部已结束任务
  *   POST tasks/run              立即投递到官方队列
- *   POST tasks/history          投递历史
+ *   POST tasks/history          官方投递历史（只对当前任务行有效；轮转后为空）
+ *   POST tasks/run-history      插件自持的运行历史（跨轮转/跨重启，0.10.9）
  *
  * 安全：这些是 **exact** 路由，匹配优先于 connection 的 `/api` 前缀路由，
  * 因此不会自动经过宿主鉴权。每个请求先调用 `connection.requestRejection`：
@@ -20,6 +21,7 @@
 import type { ScheduleBridge } from "./bridge.ts";
 import type {
   HealthResponse,
+  RunHistoryRequest,
   TaskCreateRequest,
   TaskDeleteRequest,
   TaskHistoryRequest,
@@ -249,6 +251,21 @@ export function registerRoutes(ctx: unknown, bridge: ScheduleBridge, version: st
     try {
       await bridge.runNow(body.id);
       sendJson(res, 200, { ok: true, version });
+    } catch (e) {
+      sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
+    }
+  });
+
+  R("/tasks/run-history", async (req, res) => {
+    if (methodOf(req) !== "POST") { sendJson(res, 405, { ok: false, error: "仅支持 POST" }); return; }
+    const body = await readJsonBody<RunHistoryRequest>(req);
+    if (body === undefined || typeof body.id !== "string" || body.id === "") {
+      sendJson(res, 400, { ok: false, error: "缺少任务 id" });
+      return;
+    }
+    try {
+      const page = await bridge.runHistory(body);
+      sendJson(res, 200, { ok: true, version, ...page });
     } catch (e) {
       sendJson(res, 200, { ok: false, error: String((e as Error)?.message ?? e) });
     }

@@ -76,11 +76,13 @@ type ScheduleDeliveryHistoryRequestLike = {
 type ScheduleDeliveryHistoryResultLike =
   | { records: DeliveryReceiptLike[]; nextBefore?: string; earlierRecordsUnavailable?: boolean }
   | { code: string; message?: string };
-import { MetaStore, type TaskMeta } from "./meta.ts";
+import { MetaStore, newTaskKey, type TaskMeta } from "./meta.ts";
 import { ProtectionStore, recurring } from "./protection.ts";
 import {
   EXECUTION_SUMMARY_MAX,
   MAX_VALIDITY_DAYS,
+  RUN_HISTORY_LIMIT,
+  RUN_HISTORY_PAGE,
 } from "../shared/constants.ts";
 import { perRunSessionTitle, sessionModeFor } from "../shared/types.ts";
 import type {
@@ -89,6 +91,9 @@ import type {
   ExecutionStatus,
   Frequency,
   ModelRef,
+  RunHistoryEntry,
+  RunHistoryPage,
+  RunHistoryRequest,
   SessionMode,
   TaskCreateRequest,
   TaskHistoryPage,
@@ -186,6 +191,23 @@ export class ScheduleBridge {
    * 页面拿着旧 id 点「编辑/删除/立即执行」时据此跟随到当前任务（不跨重启，够用）。
    */
   private readonly rotatedTo = new Map<string, string>();
+  /**
+   * 暂无归属的运行结果缓冲（0.10.9）。
+   *
+   * 投递记录是**刷新**时从官方回执里读出来的（异步），而 `turn/end` 是会话事件（同步）。
+   * 模型快速失败时（隔离 home 无凭据：30–130ms）执行结果可能早于投递记录落地，
+   * 这时先缓冲，等下一次投递记录写进来再吸附——否则那条记录永远停在「投递成功」。
+   * 只覆盖本进程内的错位；跨重启的错位仍只告警（历史以投递为准，不凭空建条目）。
+   */
+  private readonly orphanExecutions: Array<{ sessionId: string; execution: ExecutionRecord }> = [];
+  /**
+   * 手动「立即执行」在跑的会话（会话 → 待填写的运行记录）。
+   *
+   * 定时投递有官方 framing（`source.kind='schedule'` + `schedule_id_json`）可以归因，
+   * 手动执行走的是普通 `prompt`，没有 framing；只能按「这个会话里刚发起的那个请求」记录，
+   * 下一个没有 framing 的 `turn/end` 就归给它。同一会话以最后一次手动执行为准。
+   */
+  private readonly manualPending = new Map<string, { taskKey: string; at: number; title?: string }>();
   /** 0.10.7 一次性迁移：把历史遗留的「空白任务会话」退出工作区列表。 */
   private stubSeatsReleased = false;
 
@@ -235,6 +257,10 @@ export class ScheduleBridge {
 
   private async doRefresh(): Promise<void> {
     if (this.stopped) return;
+    // 对账时刻必须取在**第一次读官方目录之前**：本次刷新读到快照之后并发写进来的元数据
+    // （新建任务、轮转新任务）不在快照里，但也不是「官方已删」——按写入时刻保留。
+    // 0.10.9 实测：取在读取之后会把 `create()` 刚写的 builtin/sessionMode 判成过期行删掉。
+    const snapshotAt = Date.now();
     let entries = await this.ctx.schedule.catalog();
     // A persisted pause is an intent to disarm. Finish it after an interrupted
     // process before exposing the paused row; never run a second scheduler.
@@ -244,6 +270,7 @@ export class ScheduleBridge {
         const task=baseline.pausedTask,workspaceId=this.workspaceFor(task);
         if(!workspaceId)throw new Error(`「${task.title}」恢复任务的工作区不可用，配置已保留`);
         const resumed=await this.createOfficial(this.requestOf(task,workspaceId),baseline.taskId);
+        this.carryTaskKey(resumed.id, task.taskKey);
         delete baseline.pausedTask;
         this.protection.rebind(baseline.taskId,resumed.id);
         continue;
@@ -265,6 +292,7 @@ export class ScheduleBridge {
         if(!workspaceId)throw new Error('原工作区不可用，请恢复工作区后重试');
         const restored=await this.createOfficial(this.requestOf(task,workspaceId),task.id);
         this.meta.set(restored.id,{createdAt:task.createdAt,...(task.lastExecution?{lastExecution:task.lastExecution}:{})});
+        this.carryTaskKey(restored.id, task.taskKey);
         this.protection.rebind(task.id,restored.id);
       }catch(error){
         const warning=`周期任务「${task.title}」归档迁移失败，配置已保留：${String((error as Error)?.message??error)}`;
@@ -272,12 +300,13 @@ export class ScheduleBridge {
       }
     }
     entries=await this.ctx.schedule.catalog();
+    // 0.10.9：投递一落地就把「哪次投递进了哪个会话」记进运行历史。
+    // 必须在轮转**之前**做——轮转后任务指向新会话、旧官方行已删，投递回执与接收会话就丢了。
+    this.recordDeliveries(entries);
     // 0.10.8 per-run：先收尾崩溃留下的半截交换，再对「已投递但还没轮转」的任务轮转。
     // 顺序不能反：半截交换未收尾时同一任务会再轮转一次，造成重复任务、同一提示词投两次。
     if (await this.completePendingSwaps(entries)) entries = await this.ctx.schedule.catalog();
     if (await this.rotatePerRun(entries)) entries = await this.ctx.schedule.catalog();
-    // 快照时刻要早于这次读：读完之后并发写进来的元数据（新建任务/轮转新任务）不能被对账清掉。
-    const snapshotAt = Date.now();
     this.catalogCache = entries;
     const ids = new Set(entries.map(entry => entry.id));
     this.meta.reconcile(ids, this.keptMetaIds(), snapshotAt);
@@ -290,8 +319,15 @@ export class ScheduleBridge {
         meta.title = entry.title;
         changed = true;
       }
+      // 0.9.5 之前建的元数据没有稳定任务键：补一个（运行历史按它聚合，轮转继承）。
+      if (meta.taskKey === undefined || meta.taskKey === "") {
+        meta.taskKey = newTaskKey();
+        changed = true;
+      }
     }
     if (changed) this.meta.flush();
+    // 运行历史只跟随还活着的任务键：任务被删除/清理已结束后不再留着无主的记录。
+    this.meta.pruneHistories(this.liveTaskKeys());
     if (!this.stubSeatsReleased) {
       // 宿主启动时的 workspace bootstrap 会把「按 cwd 归属但不在名单里」的会话重新挂回工作区，
       // 所以迁移必须在 bootstrap 之后（本插件 inject 了 workspaceRegistry，apply 晚于它 init）跑一次。
@@ -353,6 +389,8 @@ export class ScheduleBridge {
       notify: input.notify !== false,
       createdAt: Date.now(),
       title: record.title,
+      // 0.10.9：稳定任务键在创建时分配一次，此后轮转/迁移都继承（运行历史按它聚合）。
+      taskKey: newTaskKey(),
       ...(target.workspaceId === undefined ? {} : { workspaceId: target.workspaceId }),
       ...(target.sessionTitle === undefined ? {} : { sessionTitle: target.sessionTitle }),
       ...(endsAt === undefined ? {} : { endsAt }),
@@ -467,6 +505,7 @@ export class ScheduleBridge {
           const workspaceId=this.workspaceFor(task);
           if(!workspaceId)throw new Error(`「${task.title}」原工作区不可用`);
           const entry=await this.createOfficial(this.requestOf(task,workspaceId),baseline.taskId);
+          this.carryTaskKey(entry.id, task.taskKey);
           this.protection.rebind(baseline.taskId,entry.id);
           await this.refresh();
         }
@@ -498,6 +537,7 @@ export class ScheduleBridge {
       const task=baseline.pausedTask,workspaceId=this.workspaceFor(task);
       if(!workspaceId)throw new Error('原工作区不可用，任务仍保持暂停');
       const entry=await this.createOfficial(this.requestOf(task,workspaceId),id);
+      this.carryTaskKey(entry.id, task.taskKey);
       delete baseline.pausedTask;
       this.protection.rebind(id,entry.id);
       await this.refresh();
@@ -535,6 +575,27 @@ export class ScheduleBridge {
       mode: "queue",
       content: [{ type: "text", text: entry.prompt }],
     }, new AbortController().signal);
+    // 0.10.9：手动「立即执行」也是一次运行，同样进历史（幂等键 = manual:<requestId>）。
+    // 必须在轮转之前写：轮转后 meta 换到新任务、会话也换了。
+    const meta = this.meta.ensure(entry.id, { title: entry.title });
+    if (meta.taskKey === undefined || meta.taskKey === "") meta.taskKey = newTaskKey();
+    const manualKey = meta.taskKey;
+    const manualRecord: RunHistoryEntry = {
+      at: Date.now(),
+      sessionId: String(entry.sessionId),
+      ...(meta.sessionTitle === undefined ? {} : { sessionTitle: meta.sessionTitle }),
+      messageId: `manual:${requestId}`,
+      reason: "manual-run",
+    };
+    const appendedManual = this.appendRunSafe(`记录「${entry.title}」的手动执行历史`, manualKey, manualRecord);
+    if (appendedManual) {
+      // 手动执行没有官方 framing：登记下这次请求，等这个会话的下一个 turn/end 归因。
+      this.manualPending.set(String(entry.sessionId), {
+        taskKey: manualKey,
+        at: manualRecord.at,
+        ...(meta.title === undefined ? {} : { title: meta.title }),
+      });
+    }
     // per-run：手动执行也是一次「用掉了这个会话」，同样轮转（否则下一次定时投递会追加到手动那次的会话里）。
     // 手动执行没有官方投递回执，用 requestId 当幂等键。轮转失败不影响已投递的消息，只记录可见提示。
     if (this.meta.get(entry.id)?.sessionMode !== "per-run" || !isRecurringRecord(entry)) return;
@@ -568,6 +629,27 @@ export class ScheduleBridge {
       };
     }
     throw new Error((result as { message?: string }).message ?? "读取投递历史失败");
+  }
+
+  /**
+   * 插件自持的运行历史（0.10.9）：跨 per-run 轮转、跨重启、跨官方任务 id 变化的等价记录。
+   *
+   * 官方 `history()` 在轮转后会随旧任务一起消失，所以页面主视图用这份；`fixed` 任务想看
+   * 官方原始回执仍可走 `history()`（未删减，两者并存不冲突）。
+   */
+  async runHistory(request: RunHistoryRequest): Promise<RunHistoryPage> {
+    const entry = await this.findEntry(request.id);
+    if (entry === undefined) throw new Error(`任务 ${request.id} 不存在`);
+    const meta = this.meta.ensure(entry.id, { title: entry.title });
+    const taskKey = meta.taskKey ?? this.taskKeyOf(entry.id);
+    const history = this.meta.historyOf(taskKey);
+    const limit = Math.min(RUN_HISTORY_LIMIT, Math.max(1, Math.trunc(request.limit ?? RUN_HISTORY_PAGE)));
+    return {
+      entries: history.entries.slice(0, limit),
+      dropped: history.dropped,
+      limit: RUN_HISTORY_LIMIT,
+      total: history.entries.length,
+    };
   }
 
   /** 当前 catalog 快照（页面/诊断用）。 */
@@ -873,6 +955,8 @@ export class ScheduleBridge {
       notify: prev.notify,
       createdAt: prev.createdAt,
       title: entry.title,
+      // 0.10.9：稳定任务键随轮转继承——运行历史、暂停/恢复、归档迁移都靠它认出「还是那个任务」。
+      taskKey: prev.taskKey ?? newTaskKey(),
       ...(prev.workspaceId === undefined ? {} : { workspaceId: prev.workspaceId }),
       ...(prev.endsAt === undefined ? {} : { endsAt: prev.endsAt }),
       ...(prev.agentPreset === undefined ? {} : { agentPreset: prev.agentPreset }),
@@ -890,6 +974,136 @@ export class ScheduleBridge {
   private nextRunSessionIds(prev: readonly string[] | undefined, latest: string | undefined): string[] {
     const ids = latest === undefined ? [...(prev ?? [])] : [latest, ...(prev ?? []).filter(x => x !== latest)];
     return ids.slice(0, 20);
+  }
+
+  /**
+   * 把官方投递回执记进运行历史（0.10.9）。
+   *
+   * 判据只有结构化字段 `lastDelivery`；`messageId` 是幂等键——刷新很频繁（UI 5s 轮询 +
+   * `schedule/changed`），同一条投递绝不能写第二遍。写失败只告警，不影响投递/轮转。
+   */
+  private recordDeliveries(entries: readonly ScheduleCatalogEntryLike[]): void {
+    for (const entry of entries) {
+      const delivery = entry.lastDelivery;
+      if (delivery === undefined) continue;
+      const messageId = String(delivery.messageId ?? "");
+      if (messageId === "") continue;
+      const meta = this.meta.ensure(entry.id, { title: entry.title });
+      if (meta.taskKey === undefined || meta.taskKey === "") meta.taskKey = newTaskKey();
+      const deliveredAt = Date.parse(delivery.deliveredAt);
+      const record: RunHistoryEntry = {
+        at: Number.isFinite(deliveredAt) ? deliveredAt : Date.now(),
+        sessionId: String(entry.sessionId),
+        ...(meta.sessionTitle === undefined ? {} : { sessionTitle: meta.sessionTitle }),
+        messageId,
+        reason: "scheduled",
+      };
+      const taskKey = meta.taskKey;
+      const appended = this.appendRunSafe(`记录「${entry.title}」的投递历史`, taskKey, record);
+      // 执行结果早于投递记录落地（模型快速失败）→ 现在补吸附。
+      if (appended) this.drainOrphanExecution(taskKey, String(entry.sessionId), record.at);
+    }
+  }
+
+  /** 运行历史写盘/校验失败的统一兜底：如实写 console 与宿主 logger，绝不冒泡到投递链路。 */
+  private safeHistory(action: string, fn: () => unknown): void {
+    try {
+      fn();
+    } catch (e) {
+      const message = `[dsh-scheduled-send] ${action}失败（不影响投递与调度）：${String((e as Error)?.message ?? e)}`;
+      console.warn(message);
+      this.ctx.logger?.warn?.(message);
+    }
+  }
+
+  /** `appendRun` 的兜底包装：写失败只告警，返回是否真的新增了一条。 */
+  private appendRunSafe(action: string, taskKey: string, record: RunHistoryEntry): boolean {
+    try {
+      return this.meta.appendRun(taskKey, record);
+    } catch (e) {
+      const message = `[dsh-scheduled-send] ${action}失败（不影响投递与调度）：${String((e as Error)?.message ?? e)}`;
+      console.warn(message);
+      this.ctx.logger?.warn?.(message);
+      return false;
+    }
+  }
+
+  /** 把「先到一步」的执行结果留到对应投递记录写进来时再用（10 分钟内有效，最多 20 条）。 */
+  private bufferOrphanExecution(sessionId: string, execution: ExecutionRecord): void {
+    const cutoff = Date.now() - 10 * 60_000;
+    for (let i = this.orphanExecutions.length - 1; i >= 0; i -= 1) {
+      if (this.orphanExecutions[i].execution.at < cutoff) this.orphanExecutions.splice(i, 1);
+    }
+    this.orphanExecutions.push({ sessionId, execution });
+    while (this.orphanExecutions.length > 20) this.orphanExecutions.shift();
+  }
+
+  /**
+   * 投递记录刚写进来时，把同会话里「比它更晚结束」的缓冲执行结果吸附上去。
+   * 比它更早结束的结果属于更早的某次投递（其记录没写成功），不能张冠李戴。
+   */
+  private drainOrphanExecution(taskKey: string, sessionId: string, deliveredAt: number): void {
+    for (let i = 0; i < this.orphanExecutions.length; i += 1) {
+      const item = this.orphanExecutions[i];
+      if (item.sessionId !== sessionId || item.execution.at < deliveredAt) continue;
+      this.safeHistory(`补写「${sessionId}」的执行结果`, () => {
+        if (this.meta.attachExecution(taskKey, sessionId, item.execution)) this.orphanExecutions.splice(i, 1);
+      });
+      return;
+    }
+  }
+
+  /**
+   * 暂停/恢复、归档迁移、恢复默认会重建官方任务（新 id）；稳定任务键要跟着走，
+   * 否则运行历史会被当成「另一个任务」而断开。`key` 缺失 = 老快照，保持新分配的键。
+   */
+  private carryTaskKey(newId: string, key: string | undefined): void {
+    if (key === undefined || key === "") return;
+    if (this.meta.get(newId)?.taskKey === key) return;
+    this.safeHistory(`恢复「${newId}」的任务身份`, () => this.meta.set(newId, { taskKey: key }));
+  }
+
+  /** 还活着的任务键（元数据行 + 暂停中的预置任务快照）——决定运行历史保留范围。 */
+  private liveTaskKeys(): ReadonlySet<string> {
+    const keys = new Set<string>();
+    for (const id of this.meta.ids()) {
+      const key = this.meta.get(id)?.taskKey;
+      if (key !== undefined && key !== "") keys.add(key);
+    }
+    for (const baseline of this.protection.data.defaults) {
+      const key = baseline.pausedTask?.taskKey;
+      if (key !== undefined && key !== "") keys.add(key);
+    }
+    return keys;
+  }
+
+  /**
+   * 把「已被轮转删掉的旧官方 id」归一到当前仍存在的那条元数据 id。
+   * 找不到就原样返回（调用方据此新建一行，行为与 0.10.8 一致）。
+   */
+  private metaIdFor(id: string): string {
+    let cursor = id;
+    for (let hops = 0; hops < 20; hops += 1) {
+      if (this.meta.get(cursor) !== undefined) return cursor;
+      const next = this.rotatedTo.get(cursor);
+      if (next === undefined) return cursor;
+      cursor = next;
+    }
+    return cursor;
+  }
+
+  /**
+   * 由官方任务 id 反查稳定任务键（跨轮转：页面/事件里拿到的可能是已被删掉的旧 id）。
+   * 只认内存里的轮转映射，不跨重启——重启后事件里的 id 就是当前任务 id。
+   */
+  private taskKeyOf(id: string): string | undefined {
+    let cursor: string | undefined = id;
+    for (let hops = 0; cursor !== undefined && hops < 20; hops += 1) {
+      const key = this.meta.get(cursor)?.taskKey;
+      if (key !== undefined && key !== "") return key;
+      cursor = this.rotatedTo.get(cursor);
+    }
+    return undefined;
   }
 
   /** 官方行已不存在但仍需保留的元数据 id（轮转失败/半截交换）。 */
@@ -916,6 +1130,7 @@ export class ScheduleBridge {
 
   private toView(entry: ScheduleCatalogEntryLike): TaskView {
     const meta = this.meta.ensure(entry.id, { title: entry.title });
+    const history = this.meta.historyOf(meta.taskKey);
     return {
       id: entry.id,
       title: entry.title,
@@ -939,6 +1154,9 @@ export class ScheduleBridge {
       ...(meta.rotateError === undefined ? {} : { rotateError: meta.rotateError }),
       ...(entry.lastDelivery === undefined ? {} : { lastDelivery: receiptOf(entry.lastDelivery) }),
       ...(meta.lastExecution === undefined ? {} : { lastExecution: meta.lastExecution }),
+      ...(meta.taskKey === undefined ? {} : { taskKey: meta.taskKey }),
+      runCount: history.entries.length,
+      ...(history.dropped > 0 ? { historyTruncated: true } : {}),
     };
   }
 
@@ -1041,7 +1259,11 @@ export class ScheduleBridge {
     }
     if (type !== "turn/end") return;
     const pending = this.pending.get(sessionId);
-    if (pending === undefined) return;
+    if (pending === undefined) {
+      // 没有 schedule framing：可能是「立即执行」发起的那个请求（0.10.9 起手动执行也进历史）。
+      this.finishManualRun(sessionId, data);
+      return;
+    }
     const turn = numberOrUndefined(data.turn);
     if (pending.turn !== undefined && turn !== undefined && pending.turn !== turn) return;
     this.pending.delete(sessionId);
@@ -1060,8 +1282,23 @@ export class ScheduleBridge {
     };
     const titles: string[] = [];
     for (const id of pending.taskIds) {
-      const meta = this.meta.set(id, { lastExecution: record });
-      titles.push(meta.title ?? this.catalogCache.find(x => x.id === id)?.title ?? id);
+      // 0.10.9：轮转掉的旧 id 已经不在元数据里，`set()` 会为它新建一行（新任务键）——
+      // 那样任务键与历史就都对不上了。先按轮转映射把 id 归一到**当前**那一行再写。
+      const metaId = this.metaIdFor(id);
+      // 任务键必须在写 lastExecution **之前**解析：set() 若建了新行就拿到新键了。
+      const taskKey = this.meta.get(metaId)?.taskKey ?? this.taskKeyOf(id);
+      const meta = this.meta.set(metaId, { lastExecution: record });
+      titles.push(meta.title ?? this.catalogCache.find(x => x.id === metaId)?.title ?? metaId);
+      // 跑完的这一轮吸附到对应的运行历史条目（按会话 + FIFO；per-run 轮转后旧 id
+      // 已从元数据里删掉，靠 rotatedTo 映射找回同一个任务键）。
+      this.safeHistory(`记录「${meta.title ?? id}」的执行结果`, () => {
+        if (this.meta.attachExecution(taskKey, sessionId, record)) return;
+        // 没有对应的投递记录：正常情况是投递记录还没被刷新读到（先缓冲，写进来时再吸附）；
+        // 进程在投递与执行之间重启则可能一直匹配不上 —— 不凭空新建条目（历史以「投递」为准，
+        // lastExecution 仍有完整结果），只如实留痕。
+        this.bufferOrphanExecution(sessionId, record);
+        console.warn(`[dsh-scheduled-send] 执行结果暂无对应运行记录（会话 ${sessionId}），已缓冲待投递记录落地：${meta.title ?? id}`);
+      });
     }
     const payload: ExecutionUpdate = {
       taskIds: [...pending.taskIds],
@@ -1080,6 +1317,46 @@ export class ScheduleBridge {
       this.onExecution?.(payload);
     } catch { /* 观察者不得影响会话主流程 */ }
     console.log(`[dsh-scheduled-send] 执行${status === "success" ? "完成" : "结束"}：${titles.join("、") || sessionId}`);
+  }
+
+  /**
+   * 手动执行的结果归因：把这一轮的 `turn/end` 写进对应那条 `manual-run` 记录。
+   *
+   * 判据：会话里有登记过的手动请求，且这轮不是 schedule framing 触发的（调用方已确认）。
+   * 找不到可填写的记录就只留痕——历史以「投递/触发」为准，不凭空新建。
+   */
+  private finishManualRun(sessionId: string, data: Record<string, unknown>): void {
+    const manual = this.manualPending.get(sessionId);
+    if (manual === undefined) return;
+    // 10 分钟还没等到这一轮结束（模型卡住/被用户接管）：作废，避免把后来的轮次张冠李戴。
+    if (Date.now() - manual.at > 10 * 60_000) {
+      this.manualPending.delete(sessionId);
+      return;
+    }
+    const reason = data.reason as { kind?: unknown; error?: { message?: unknown; code?: unknown } } | undefined;
+    const status = statusOf(reason?.kind);
+    if (status === undefined) return;
+    this.manualPending.delete(sessionId);
+    const endedAt = Date.now();
+    const startedAt = this.turnStartedAt.get(sessionId) ?? manual.at;
+    const summary = truncateText(this.lastAssistantText.get(sessionId) ?? "", EXECUTION_SUMMARY_MAX);
+    const errorText = stringOrUndefined(reason?.error?.message) ?? stringOrUndefined(reason?.error?.code);
+    const record: ExecutionRecord = {
+      status,
+      at: endedAt,
+      durationMs: Math.max(0, endedAt - startedAt),
+      ...(summary === "" ? {} : { summary }),
+      ...(errorText === undefined ? {} : { error: errorText }),
+    };
+    const label = manual.title ?? sessionId;
+    this.safeHistory(`记录「${label}」的手动执行结果`, () => {
+      if (this.meta.attachExecution(manual.taskKey, sessionId, record)) return;
+      this.bufferOrphanExecution(sessionId, record);
+      console.warn(`[dsh-scheduled-send] 手动执行结果暂无对应运行记录（会话 ${sessionId}），已缓冲：${label}`);
+    });
+    this.lastAssistantText.delete(sessionId);
+    this.turnStartedAt.delete(sessionId);
+    this.currentTurn.delete(sessionId);
   }
 
   /** 供 index.ts 接日志/诊断；不参与通知送达。 */

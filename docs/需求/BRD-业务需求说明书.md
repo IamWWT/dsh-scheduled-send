@@ -248,3 +248,18 @@
 → notify-alert 合并推送 → 用户手机收到「Scheduled Task Finished」，全链路实测通过；
 UI 断言（品牌移除、按钮并排、折叠标识、重开）见 `ops/validation/dsh-scheduled-send-0.8.0/`
 verify-ui / verify-rail 脚本与截图。
+
+## 8. 2026-10-28 每次执行新建会话与运行历史（v0.10.7–v0.10.9，现行规格）
+
+1. **v0.10.7 新会话名被任务标题污染**：任务会话建好即 `detachSession` 退席（不再被 web「新会话」
+   复用），首次真实投递/turn 后挂回；启动时一次性迁移旧空白任务会话。
+2. **v0.10.8 每次执行新建会话（`sessionMode`）**：`builtin` 采集类（日报/周报/月报/年报）缺省 `per-run`；
+   观察到投递（`lastDelivery.messageId` 幂等）后做一次「建新会话 → 建新任务 → 删旧任务」，
+   先建后删 + `pendingSwap` 自愈 + 失败保留原任务（可见 `rotateError`，同一条投递最多重试 2 次）。
+3. **v0.10.9 跨轮转的投递/执行历史**：轮转删旧任务 ⇒ 官方 `history()` 对新任务为空，用户看不到
+   历史。插件改为按**稳定任务键** `taskKey`（轮转/暂停恢复/归档迁移/恢复默认都继承）自持
+   `histories[taskKey]`：每次投递记 `at/sessionId/sessionTitle/messageId/reason`，`turn/end` 吸附
+   `execution{status,durationMs,summary,error}`；手动执行也记一条（无 framing → 登记会话后归因）；
+   每任务上限 200 条、超出丢最旧并提示已截断；写元数据失败只告警、不影响投递与轮转；
+   任务页每行「运行历史（N）」可展开并按行「打开会话」，`fixed` 另可看官方投递历史。
+   验收：单测 7 组 + 隔离实例 3089 实跑（`ops/validation/sched-history-20261028`，13/13 断言通过）。

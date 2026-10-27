@@ -24,7 +24,7 @@ export const name = "scheduled-send";
 export const inject = ["webServer", "schedule", "sessionController", "workspaceRegistry", "sessions"];
 
 /** 与 package.json 同步。 */
-export const VERSION = "0.10.8";
+export const VERSION = "0.10.9";
 
 export { ScheduleBridge, type ExecutionUpdate } from "./host/bridge.ts";
 export type { TaskMeta } from "./host/meta.ts";

@@ -104,6 +104,48 @@ export interface ExecutionRecord {
   error?: string;
 }
 
+/**
+ * 运行历史一条记录的触发来源（0.10.9）。
+ *   - `scheduled`：官方 Schedule 投递（有投递回执 messageId）；
+ *   - `manual-run`：页面「立即执行」（走官方 prompt 队列，没有投递回执，幂等键 = `manual:<requestId>`）。
+ */
+export type RunReason = "scheduled" | "manual-run";
+
+/**
+ * 一次「投递 + 执行」的等价记录（0.10.9）。
+ *
+ * 为什么插件要自己记：per-run 轮转 = 删旧任务建新任务，官方 `history()` 对新任务是空的。
+ * 这条记录跟着**稳定业务身份**（meta `taskKey`，轮转时继承）走，因此跨轮转、跨重启、
+ * 跨官方任务 id 变化都连续。
+ *
+ * 幂等键 = `messageId`：同一条投递/手动执行绝不写第二遍（刷新很频繁）。
+ */
+export interface RunHistoryEntry {
+  /** 投递（或手动触发）时刻，epoch ms；页面按本地时区展示。 */
+  at: number;
+  /** 本次投递落在哪个会话（per-run 轮转前的那一个）。 */
+  sessionId: string;
+  /** 该会话当时的标题（轮转后仍可读，不会因为任务换了会话就被覆盖）。 */
+  sessionTitle?: string;
+  /** 官方投递回执 id；手动执行 = `manual:<requestId>`。 */
+  messageId: string;
+  reason: RunReason;
+  /** 执行结果；投递了但还没跑完（或进程重启丢观察）时为 undefined。 */
+  execution?: ExecutionRecord;
+}
+
+/** 运行历史接口响应（每任务上限见 `RUN_HISTORY_LIMIT`）。 */
+export interface RunHistoryPage {
+  /** 时间倒序（新的在前）。 */
+  entries: RunHistoryEntry[];
+  /** 超上限被丢弃的条数（>0 = 已截断，页面必须说明）。 */
+  dropped: number;
+  /** 每任务保留上限。 */
+  limit: number;
+  /** 实际留在记录里的条数（≤ limit；`entries` 可能因分页更少）。 */
+  total: number;
+}
+
 /** 模型路由引用（官方 ModelSelection 的 provider+model 子集；label 仅展示用）。 */
 export interface ModelRef {
   provider: string;
@@ -134,6 +176,11 @@ export interface TaskView {
   agentPreset?: string;
   /** 插件元数据：任务绑定的模型（应用时刻 = 创建/更新时对目标会话 selectModel）。 */
   model?: ModelRef;
+  /**
+   * 插件内部的稳定业务身份（0.10.9）：per-run 轮转时继承，运行历史按它聚合。
+   * UI 不需要展示；暴露出来是为了诊断与「暂停/恢复、归档迁移后历史仍连续」。
+   */
+  taskKey?: string;
   /** 插件元数据：预置任务（由集成方/脚本创建，页面「预置任务」tab 分组展示）。 */
   builtin?: boolean;
   /** 插件记录的创建时刻（epoch ms）。 */
@@ -148,6 +195,10 @@ export interface TaskView {
   rotateError?: { at: number; message: string };
   lastDelivery?: DeliveryReceipt;
   lastExecution?: ExecutionRecord;
+  /** 插件自持的运行历史条数（0.10.9；详情走 `/tasks/run-history`，列表只报数量）。 */
+  runCount: number;
+  /** 运行历史已截断（超过每任务上限，最旧的被丢弃）。 */
+  historyTruncated?: boolean;
 }
 
 /** 新建任务请求。 */
@@ -245,6 +296,13 @@ export interface TaskHistoryPage {
   records: DeliveryReceipt[];
   nextBefore?: string;
   earlierRecordsUnavailable?: boolean;
+}
+
+/** 插件运行历史查询请求（0.10.9）。 */
+export interface RunHistoryRequest {
+  id: string;
+  /** 本次返回条数上限（缺省 `RUN_HISTORY_PAGE`，最大 = `RUN_HISTORY_LIMIT`）。 */
+  limit?: number;
 }
 
 /** 执行状态事件（Host 内部/日志用；不跨插件发送）。 */

@@ -3,8 +3,8 @@
 ## 当前状态
 
 - 文档性质：操作手册（分层测试与验收操作指南）
-- 对应版本：**v0.10.8**
-- 部署：**生产未装 0.10.8**（`~/.dsh-dev/profiles/web` 已装 0.10.7，**未重启**，3082 仍跑 0.10.6 模块图）；
+- 对应版本：**v0.10.9**
+- 部署：**生产未装 0.10.8/0.10.9**（`~/.dsh-dev/profiles/web` 已装 0.10.7，**未重启**，3082 仍跑 0.10.6 模块图）；
   官方 `ui-schedule` 已在 profile patch 中 `disabled: true`——验收须断言页面「无自动化任务、有定时任务」
   （host `schedule` 服务不受影响）
 - 状态：有效（测试面对象 = `ScheduleBridge`（官方 schedule 服务控制面）+ `/tasks` 路由契约；
@@ -22,6 +22,7 @@ pnpm check             # 全部离线测试：门禁构建 + host/client typeche
 pnpm test              # 离线单元测试（不含构建门禁/typecheck）
 node test/smoke-test.mjs             # ScheduleBridge 层（mock 官方 schedule/sessionController）
 node test/per-run-rotation-test.mjs  # 0.10.8 per-run 轮转（幂等/失败保留/半截交换自愈/fixed 不受影响）
+node test/run-history-test.mjs       # 0.10.9 运行历史（跨轮转/幂等/吸附/重启/截断/写盘失败）
 node test/routes-test.mjs            # HTTP 路由层（含 401 鉴权回归）
 node test/session-opener-test.mjs    # 「打开会话」跳转 helper（this 绑定）
 node test/session-meta-test.mjs      # 会话标题派生纯函数
@@ -63,6 +64,18 @@ node scripts/e2e-3082.mjs <base> --token <启动token> [--workspace <id>|--sessi
 | 半截交换自愈 | 官方表里同时存在新旧两条 + `pendingSwap` 标记 → 刷新后只留新任务、继承执行会话、不重复轮转 |
 | 会话挂回 | 执行过的会话在 `turn/start` 后 `attachSession`；未执行的新会话保持退席 |
 
+### 1.1c `test/run-history-test.mjs` — 跨轮转的运行历史（0.10.9）
+
+| 场景组 | 断言要点 |
+|---|---|
+| 跨两次轮转连续 | 每次投递记 1 条；两次轮转后 2 条、会话 id分别对应两个执行会话；`taskKey` 两次轮转都继承；旧（已删）任务 id 仍能查到同一份历史 |
+| `messageId` 幂等 | 反复刷新、同一条回执再报一次都不追加 |
+| 执行结果吸附 | `turn/end` 写进对应那条（per-run 轮转后的旧 id 也找得对）；更早那条不受影响；失败带 `error` |
+| 跨重启 | `new Bridge(同一 stateDir)` 后 `runCount`/条目/摘要原样读回 |
+| fixed 任务 | 不轮转、会话不变，同样记录；手动「立即执行」记 `manual-run` 一条（`manual:` 前缀幂等键） |
+| 上限截断 | 205 条 → 保留 200、`dropped=5`、`historyTruncated=true`、默认分页只返 50、`total=200`；删除任务后历史被清理 |
+| 写 meta 失败 | 把 `tasks-meta.json` 换成目录 → 投递/轮转照常完成、无重复任务、`console.warn` 如实留痕、内存历史仍可读、手动执行不受影响 |
+
 ### 1.2 `test/routes-test.mjs` — HTTP 路由层
 
 mock `webServer` 捕获 exact handler + EventEmitter 模拟 req/res 直接调 `registerRoutes`；
@@ -74,6 +87,7 @@ mock `webServer` 捕获 exact handler + EventEmitter 模拟 req/res 直接调 `r
 | `GET/POST /tasks` | 列表形状；创建载荷透传 bridge；bridge 抛错 → 200 + `ok:false`（人话 error） |
 | `POST /tasks/update` | 缺 id → 400；正常 → 更新后 task |
 | `POST /tasks/delete` / `delete-inactive` / `run` / `history` | 参数校验 + 成功形状 |
+| `POST /tasks/run-history` | 运行历史形状（`entries/limit/dropped`）+ 手动执行留下 `manual-run` 一条；缺 id → 400；GET → 405；未知任务 → `ok:false` + 「不存在」 |
 | 方法不支持 | 405 + `ok:false` |
 | **鉴权** | mock `connection.requestRejection` 返回 401/403 → 响应码与文案一致，**业务 handler 未被调用**（exact 路由绕过 `/api` 前缀鉴权的回归位） |
 
@@ -130,6 +144,22 @@ zh/en 文案与合并键。两插件契约改动必须两侧同时跑。
 - ⚠️ 官方 `every_seconds` 最小 **60 秒**，无法用 10 秒间隔复现（这是宿主校验，不是插件限制）。
 - 隔离 home 无模型凭据：`turn/start` 正常、投递正常，模型执行 `failed`——本轮不验执行结果。
 
+## 2c. 隔离实例真跑：运行历史（0.10.9，已执行）
+
+- 环境：`ops/validation/sched-history-20261028`（独立 `DSH_HOME=home/`、127.0.0.1:**3089**、
+  仓内 pnpm store），profile 只装本插件 0.10.9 tgz；出货包与验证包一致
+  （`cmp lib/index.js` / `lib/client.js`，md5 `86fe2c90…` / `cdd521b8…`）。
+- 复跑命令、证据表与实测结论见该目录 `README.md`。
+- 实测（2026-10-28 02:33–02:37）：`every 60s` 的 per-run 任务 + fixed 对照；
+  per-run 每轮投递进新会话、`runCount` 逐轮 +1，两次轮转后历史连续（会话 id 与执行序一一对应），
+  手动「立即执行」多一条 `manual-run` 且执行结果同样归因；
+  **官方 `schedule.json` 里 per-run 新任务行 `deliveryHistory=0`、fixed 行=3**——正是本版要补的差。
+- 机器核对：`node scripts/assert-history.mjs` → `evidence/assert-history.json`（13/13 ✅）。
+- UI（Playwright + 系统 Chrome，不借用户浏览器）：`node scripts/ui-history.cjs` →
+  任务页「运行历史（N）」可展开、行内「打开会话」到达那次执行所在会话、fixed 任务可另看官方投递历史，
+  console 0 报错（`evidence/ui-0*.png` + `ui-history-result.json`）。
+- 边界：隔离 home 无模型凭据，实跑只到「执行失败」；执行成功/中断、上限截断、跨重启读回由单测覆盖。
+
 ## 3. 端到端测试
 
 ### 3.1 API 端到端 `scripts/e2e-3082.mjs`（自动化，活实例）
@@ -159,6 +189,8 @@ delete → 列表恢复。只操作临时任务、不调 run、不投递真实�
 | 6 | 有效期 | 设一个近未来 `endsAt` → 到期后任务从官方列表消失、进入「已结束」折叠区 |
 | 7 | 输入框「⏰ 定时」 | 当前草稿建一次性任务；dock 行显示待触发预览 |
 | 8 | 通知联动 | 装 notify-alert ≥0.9.0 且渠道配好：任务执行完成后微信收到「定时任务完成/失败」推送（含任务名/耗时/结果摘要）；同轮**不再**重复发普通「回合结束」 |
+| 9 | 运行历史（0.10.9） | 行内「运行历史（N）」展开：时间倒序、状态（投递成功/执行成功/执行失败/中断）、会话标题 + 「打开会话」可跳到那次执行所在会话；per-run 轮转后旧记录仍在；`fixed` 任务可另看官方投递历史；无记录时显示「官方历史在轮转时会清空，这里记等价信息」 |
+| 10 | 运行历史截断 | 真跑超过 200 次不现实 → 单测覆盖（`test/run-history-test.mjs`）；页面在 `historyTruncated` 时显示「已截断：更早的 N 条已丢弃」 |
 | 9 | 鉴权 | 未登录直接 `curl /api/scheduled-send/tasks` → 401 JSON；公网域名同样 |
 | 10 | 重启恢复 | 任务表与 meta 不丢；错过时刻由官方补投 |
 
